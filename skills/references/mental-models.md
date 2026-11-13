@@ -2,7 +2,7 @@
 
 Shared vocabulary for the planning and supervision skills in this directory tree. Naming a model gives the reviewer, the auditor, and the planner one phrase for one recurring defect, so the same problem is described the same way twice instead of re-derived.
 
-**How to use this file**: consuming skills read it on demand — the same relative-read pattern `../plan-iterate/SKILL.md` is read with in `plan-ideal/SKILL.md:29` — and cite **at most 3 models by name** per report. Do not inline this catalogue into a `SKILL.md`; the citation is the payload, the catalogue is the reference.
+**How to use this file**: consuming skills read it on demand through the relative sibling path `../references/mental-models.md` and cite **at most 3 models by name** per report. Do not inline this catalogue into a `SKILL.md`; the citation is the payload, the catalogue is the reference.
 
 Each entry is the model name, the question it asks, and (first section) where the tooling already enforces it.
 

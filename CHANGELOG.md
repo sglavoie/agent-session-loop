@@ -369,6 +369,16 @@ A polish and hardening round after the public release.
 - Documentation agrees with the parser on command synopses, `supervisor-guide`
   JSON keys and leaf-only help groups; the bridge release check requests the
   retired protocol, and the mental-model citations point at current lines.
+- Skills: `plan-iterate` points its next step at `asl prepare` when the plan
+  already has session headings and complete contracts (otherwise at `--ideal`
+  or the by-hand `session-split` route), defers the session-heading grammar to
+  the parser, and drops repeated rules. `session-split` and `session-expand`
+  describe themselves as the by-hand alternative to `asl prepare`.
+
+### Removed
+
+- The `plan-ideal` skill, a read-only alias for `plan-iterate --ideal-only`.
+  Rerun `install.py` to prune its installed link.
 
 ## [0.2.0] - 2026-10-23
 

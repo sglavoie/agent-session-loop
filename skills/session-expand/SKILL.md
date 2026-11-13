@@ -1,6 +1,6 @@
 ---
 name: session-expand
-description: Validate and expand split session files against the actual codebase. Verifies file paths, signatures, assumptions, completion contracts, and manifest readiness. Sequential-by-design - no parallel safety analysis. Takes a plan directory or single session file path.
+description: Validate and expand split session files against the actual codebase. Verifies file paths, signatures, assumptions, completion contracts, and manifest readiness. Sequential-by-design - no parallel safety analysis. Takes a plan directory or single session file path. By-hand route: second stage after session-split; `asl prepare` performs the same validation unattended.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 disable-model-invocation: true
 ---
@@ -10,6 +10,8 @@ disable-model-invocation: true
 ## Purpose
 
 Research the actual codebase to validate and expand claims in session files produced by `session-split`. For each session, verify that referenced file paths exist, function/struct/class names are correct, code patterns match reality, and inter-session dependencies are satisfiable. Validate each session's `## Completion Contract` with `asl contract-check`, re-resolve referenced paths/commands against the live codebase, then run final preflight with `--mark-loop-ready` so clean expanded plans are ready for `session-run`. This skill is a thin expert/manual wrapper over the `agent_session_loop.prepare_*` modules (via `asl expand-ingest`): the research findings are assembled into a versioned validator result JSON that the module parses fail-closed, stores in the derived `prepare-validation.json` aggregate, renders into a concise `.expand.md` annotations file alongside each session, and uses to apply exact factual corrections to session files — malformed or incomplete findings can never mutate the plan.
+
+**By-hand route.** This skill is the second stage of the by-hand alternative to `asl prepare`, which runs read-only validator workers through the same `asl expand-ingest` path and then baselines and marks the plan `loop-ready` without a conversation. Use `session-expand` when you want to do or watch the codebase research yourself, or after editing a split plan by hand; to rerun the unattended validation on an existing plan directory instead, use `asl prepare --resume <plan-dir>`.
 
 This skill is sequential-by-design. It does not extract, validate, or generate parallel-safety metadata, and it does not write `parallel-validation.md`. Legacy `## Parallel Metadata` blocks and any pre-existing `parallel-validation.md` on disk are ignored.
 
@@ -257,7 +259,7 @@ Otherwise (the command exits non-zero, `marked_loop_ready` is false, or the fina
 
 ## Important Notes
 
-- Mental models: read the sibling reference `../references/mental-models.md` on demand (the same relative sibling read `plan-ideal/SKILL.md:29` uses) rather than inlining it, and cite at most 3 models by name per report. This skill's assigned models are **Chesterton's fence** — why does this code exist, before a session removes or alters it, which is what an `R` claim answers and what `removal-unjustified` records the absence of — and **map vs territory**, the reason every claim is re-checked against the repository instead of trusted from the plan.
+- Mental models: read the sibling reference `../references/mental-models.md` on demand rather than inlining it, and cite at most 3 models by name per report. This skill's assigned models are **Chesterton's fence** — why does this code exist, before a session removes or alters it, which is what an `R` claim answers and what `removal-unjustified` records the absence of — and **map vs territory**, the reason every claim is re-checked against the repository instead of trusted from the plan.
 - Never modify `context.md`; never modify `manifest.md` except through the final `asl preflight --mark-loop-ready` invocation in directory mode.
 - Skip sessions whose Handoff status is not "pending" — the codebase has already been modified by that session's execution, so checking stale claims would mislead. Note skipped sessions in the summary.
 - New code claims (files or functions to be created) are valid and should not be flagged unless they conflict with existing code.

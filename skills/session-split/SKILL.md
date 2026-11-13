@@ -1,6 +1,6 @@
 ---
 name: session-split
-description: Split a multi-session plan into per-session files for serial execution by `session-run`. Accepts a plan file path or captured inline plan text. Also proposes session boundaries if the plan lacks session structure.
+description: Split a multi-session plan into per-session files for serial execution by `session-run`. Accepts a plan file path or captured inline plan text. Also proposes session boundaries if the plan lacks session structure. By-hand route: `asl prepare` runs split, expand, baselines, and final preflight in one command; use this skill when you want to inspect or edit the plan between stages.
 allowed-tools: Bash, Read, Write, Glob, Grep
 disable-model-invocation: true
 ---
@@ -12,6 +12,8 @@ disable-model-invocation: true
 Parse a multi-session plan and split it into a persistent directory of smaller, self-contained files: shared context, individual session files with handoff templates, and a manifest with a ready-to-paste serial execution command. The generated plan is serial-only by design — `session-run` auto-advances through sessions in dotted numeric order. By default `asl split` refuses a duplicate plan id before creating any directory; intentional duplicates opt in with `--force-new`, which preserves the numbered sibling suffix behavior.
 
 All file generation is owned by the `asl split` subcommand, which chains the deterministic authoring API (the `agent_session_loop.authoring_*` modules) end to end. This skill authors only the per-session completion contracts and (optionally) an analysis note; it never hand-writes `context.md`, `session-N.md`, `manifest.md`, or `progress.md`.
+
+**By-hand route.** This skill is the first stage of the by-hand alternative to `asl prepare`. `asl prepare PLAN.md --cwd <root>` runs the same pipeline unattended (split, codebase validation, baselines, final `--mark-loop-ready` preflight) and is the default after `plan-iterate`. Choose `session-split` then `session-expand` when you want to author or review contracts and session boundaries yourself, watch the codebase validation, or edit the plan between stages. Both routes end in the same `loop-ready` plan directory that `asl run` executes.
 
 ## Input
 
@@ -44,7 +46,7 @@ Normalize the user's input into a real source plan before splitting. (`asl split
 
 Pipe the captured content to `asl split --inline-stdin` in Step 6 (it persists the pasted markdown as a durable source file before splitting). Do not split directly from ephemeral conversation text.
 
-If the user explicitly provides a base directory, pass it through with `--base-dir <dir>` in Step 6; it applies to both the captured inline source and the split output. `asl split --json` reports the resolved `source_path`; report it so the user can reuse it with `plan-iterate`, `plan-ideal`, `<skill-prefix>session-expand`, or a later `<skill-prefix>session-split`.
+If the user explicitly provides a base directory, pass it through with `--base-dir <dir>` in Step 6; it applies to both the captured inline source and the split output. `asl split --json` reports the resolved `source_path`; report it so the user can reuse it with `plan-iterate`, `<skill-prefix>session-expand`, or a later `<skill-prefix>session-split`.
 
 ### Step 2: Validate and Repair the Source Plan
 

@@ -29,13 +29,9 @@ from tests.support import (
 
 class PlanWorkflowDocsTests(unittest.TestCase):
     PLAN_ITERATE_PATH = REPO_ROOT / "skills/plan-iterate/SKILL.md"
-    PLAN_IDEAL_PATH = REPO_ROOT / "skills/plan-ideal/SKILL.md"
 
     def _plan_iterate_text(self) -> str:
         return self.PLAN_ITERATE_PATH.read_text(encoding="utf-8")
-
-    def _plan_ideal_text(self) -> str:
-        return self.PLAN_IDEAL_PATH.read_text(encoding="utf-8")
 
     def test_plan_iterate_documents_ideal_mode_invocations(self) -> None:
         text = self._plan_iterate_text()
@@ -121,11 +117,15 @@ class PlanWorkflowDocsTests(unittest.TestCase):
         self.assertIn("without inventing a preflight failure", expand)
         self.assertIn("factual preflight corrections distinct", preflight)
 
-    def test_plan_iterate_uses_shared_source_heading_grammar(self) -> None:
+    def test_plan_iterate_delegates_heading_grammar_to_parser(self) -> None:
         text = self._plan_iterate_text()
 
-        self.assertIn("case-insensitive H2-H6 ATX headings", text)
-        self.assertIn("Source ID components may be zero-padded", text)
+        # Like session-split, the parser owns the source-heading grammar; the
+        # skill keeps only the behavior around malformed and accepted headings.
+        self.assertIn("agent_session_loop.authoring_parse.parse_plan_document", text)
+        self.assertIn("asl split --check --plan-file <plan> --json", text)
+        self.assertNotIn("zero to three leading spaces", text)
+        self.assertNotIn("case-insensitive H2-H6 ATX headings", text)
         self.assertIn("surface malformed-candidate parser errors directly", text)
         self.assertIn("without a normalization question or source rewrite", text)
         self.assertIn(
@@ -137,21 +137,14 @@ class PlanWorkflowDocsTests(unittest.TestCase):
             "any `## Session N` or `### Session N` headings",
             text,
         )
-        self.assertNotIn(
-            "at least two explicit `## Session <id>: Title` (or `### Session <id>`) "
-            "headings",
-            text,
-        )
+        # A line citation into another skill rots whenever that skill moves.
+        self.assertNotRegex(text, r"SKILL\.md:\d")
 
-    def test_plan_iterate_preserves_default_mode_without_ideal_flag(
+    def test_plan_iterate_default_mode_runs_bounded_qa_rounds(
         self,
     ) -> None:
         text = self._plan_iterate_text()
 
-        self.assertIn(
-            "behavior when `--ideal` is absent is unchanged",
-            text,
-        )
         self.assertIn("### Step 4: Iterative Q&A Rounds", text)
         self.assertIn("Run up to **4 rounds** of question-and-edit cycles.", text)
 
@@ -160,10 +153,6 @@ class PlanWorkflowDocsTests(unittest.TestCase):
 
         self.assertIn("## Ideal-Only Mode (`--ideal-only`)", text)
         self.assertIn("**Never modify the plan file** in this mode", text)
-        self.assertIn(
-            "read-only alias for `plan-iterate --ideal-only`",
-            text,
-        )
 
     def test_plan_iterate_premortem_cites_category_aware_recurrence(self) -> None:
         text = self._plan_iterate_text()
@@ -212,22 +201,43 @@ class PlanWorkflowDocsTests(unittest.TestCase):
         for model in assigned:
             self.assertIn(model.lower(), lowered)
 
-    def test_plan_ideal_is_read_only_alias_for_ideal_only_mode(self) -> None:
-        text = self._plan_ideal_text()
-
-        self.assertIn("alias for `plan-iterate --ideal-only`", text)
+    def test_plan_ideal_alias_is_retired(self) -> None:
+        # `plan-iterate --ideal-only` is the one read-only ideal entry point;
+        # no skill may still send a reader to the removed alias.
+        self.assertFalse((REPO_ROOT / "skills/plan-ideal/SKILL.md").exists())
+        mentions = [
+            str(path.relative_to(REPO_ROOT))
+            for path in sorted((REPO_ROOT / "skills").rglob("*.md"))
+            if "plan-ideal" in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(mentions, [])
+        text = self._plan_iterate_text()
+        self.assertIn("## Ideal-Only Mode (`--ideal-only`)", text)
         self.assertIn("**Never modify the plan file**", text)
-        self.assertIn("Ideal-Only Mode (`--ideal-only`)", text)
-        self.assertIn("one shared research pass", text)
 
-    def test_plan_ideal_alias_references_existing_plan_iterate_mode(
-        self,
-    ) -> None:
-        iterate_text = self._plan_iterate_text()
-        ideal_text = self._plan_ideal_text()
+    def test_plan_iterate_routes_next_step_through_asl_prepare(self) -> None:
+        text = self._plan_iterate_text()
 
-        self.assertIn("../plan-iterate/SKILL.md", ideal_text)
-        self.assertIn("## Ideal-Only Mode (`--ideal-only`)", iterate_text)
+        self.assertIn("`needs-plan-iteration`", text)
+        self.assertIn(
+            "**Session headings and complete contracts present**: "
+            "`asl prepare <plan-path> --cwd <repo-root>`",
+            text,
+        )
+        self.assertIn("the by-hand route `session-split <plan-path>`", text)
+        self.assertNotIn("Next step: `session-split <plan-path>`", text)
+        self.assertIn("Next step: `asl prepare <plan-path> --cwd <repo-root>`", text)
+
+    def test_split_and_expand_name_themselves_the_by_hand_route(self) -> None:
+        for name in ("session-split", "session-expand"):
+            text = (REPO_ROOT / "skills" / name / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            frontmatter = text.split("---", 2)[1]
+            self.assertIn("By-hand route", frontmatter, name)
+            self.assertIn("`asl prepare`", frontmatter, name)
+            self.assertIn("**By-hand route.**", text, name)
+            self.assertIn("by-hand alternative to `asl prepare`", text, name)
 
 
 class InstallVerificationTests(unittest.TestCase):
@@ -312,10 +322,10 @@ class InstallVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             fake_bin = self._install_fake_home_links(home)
-            folded = home / ".claude/skills/plan-ideal"
+            folded = home / ".claude/skills/plan-iterate"
             folded.unlink()
             folded.mkdir()
-            (folded / "SKILL.md").symlink_to(REPO_ROOT / "skills/plan-ideal/SKILL.md")
+            (folded / "SKILL.md").symlink_to(REPO_ROOT / "skills/plan-iterate/SKILL.md")
 
             payload = install_verify.verify_install(
                 repo_root=REPO_ROOT,
