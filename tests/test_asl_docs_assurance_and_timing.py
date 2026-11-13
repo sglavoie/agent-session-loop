@@ -206,6 +206,24 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         self.assertIn("retained stderr artifact", prompt)
         self.assertIn("only if a", prompt)
 
+    def test_the_auditor_is_told_a_pending_terminal_record_is_the_ordering(
+        self,
+    ) -> None:
+        # ASI-4: the in-run audit is collected before `run_finished` exists, and
+        # the auditor kept reading the bundle's `terminal_pending` projection
+        # (status `all-complete`, no terminal event, null `run_finished_at`)
+        # as a missing terminal record. The deterministic checks already knew;
+        # the prompt has to say it too, without excusing a real defect.
+        prompt = supervisor_audit_agent.AUDIT_PROMPT_TEMPLATE
+
+        self.assertIn("`events.terminal_pending: true`", prompt)
+        self.assertIn("before `run_finished` is\n  appended", prompt)
+        self.assertIn("are the required ordering", prompt)
+        self.assertIn("`observability.terminal-artifacts`", prompt)
+        self.assertIn("more than once", prompt)
+        self.assertIn("`events.terminal_pending: true`", self.docs)
+        self.assertIn("not a missing terminal record", self.docs)
+
     def test_docs_state_why_an_authored_gate_reports_no_failure_diagnostic(
         self,
     ) -> None:

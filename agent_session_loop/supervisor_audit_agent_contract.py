@@ -209,6 +209,17 @@ Rules the answer must satisfy:
   bundle indexes for every failed check. Report a defect here only if a
   generated gate lost its diagnostic, or if that stderr artifact is itself
   missing from the evidence index.
+- `events.terminal_pending: true` means this audit runs inside the run's own
+  terminalization, after the terminal adjudicator and before `run_finished` is
+  appended, so the audit's artifacts can precede the terminal record. In that
+  bundle a missing `run_finished` record, a null `run_finished_at` or
+  `duration_seconds`, and a status that already carries the adjudicated
+  `reason` (such as `all-complete`) are the required ordering, not a missing
+  terminal record or a status/event disagreement. Do not report
+  them under `observability.terminal-artifacts` or any other key. A defect here
+  still needs evidence that holds regardless of that ordering: a terminal
+  record that already exists more than once, a record of work after one, or a
+  turn without a readable result file.
 
 Every finding carries exactly one `identity` object, and there is no default:
 

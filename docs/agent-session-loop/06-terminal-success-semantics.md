@@ -172,7 +172,12 @@ Ordering inside one run is fixed. Every ending reaches the terminalization
 coordinator exactly once, the terminal adjudicator runs there first, the audit
 second, and the audit's artifacts and ledger records are on disk
 before `run_finished` is appended — so the terminal event and the state
-projection carry the same verdict rather than two. The outcome and the exit
+projection carry the same verdict rather than two. The bundle the audit reads
+is therefore collected with `events.terminal_pending: true`, and the
+audit-agent prompt says what that means (ASI-4): no `run_finished` record, a
+null `run_finished_at`, and a status already carrying the adjudicated reason
+are the ordering the audit requires, not a missing terminal record, exactly as
+the deterministic terminal checks already read it. The outcome and the exit
 code a caller carries into the coordinator are a proposal that only the
 adjudicator may overturn; auditing changes neither: a finding, a failed audit,
 or a failed publication never turns a successful run into a failed one, never

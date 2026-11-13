@@ -55,6 +55,8 @@ A polish and hardening round after the public release.
   reason alone and called it recoverable. The retained-work commit names the
   failed verification attempt and the repairs left (or that the budget is
   spent) instead of "Repair attempt 3 of 2".
+- The audit agent is told that an in-run audit precedes `run_finished`, so it
+  stops reporting the pending terminal record of a completed run as missing.
 - Copilot preparation and audit turns adapt to the remote-option change in
   CLI 1.0.103 while retaining their read-only restrictions. Lifecycle acceptance
   disables Copilot updates, refuses to verify a version that changes during the
