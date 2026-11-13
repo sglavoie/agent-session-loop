@@ -12,7 +12,6 @@ from pathlib import Path
 from agent_session_loop import (
     authoring_render,
     cli,
-    plans_errors,
     plans_files,
     preflight_footprint,
     prepare_expand_ingest,
@@ -137,27 +136,38 @@ class LegacyRepositoryFootprintPrepareTests(unittest.TestCase):
             prepare_validation_store.load_prepare_validation(self.plan_dir)
         )
 
-    def test_expand_ingest_refuses_a_v1_payload_reporting_repository_ambiguity(
+    def test_expand_ingest_keeps_a_v1_repository_ambiguity_issue_without_refusing(
         self,
     ) -> None:
-        # A plan whose own footprint is clean, so only the validator's report
-        # can refuse it.
+        # A plan whose own footprint is clean: the deterministic checks are the
+        # authority, so a validator's ambiguity report is kept as an ordinary
+        # issue instead of refusing the batch. Validators raised it for runtime
+        # paths in no repository at all (files on another host, state dirs).
         plan_dir = self.tmp_path / "single-repo-plan"
         _write_prepare_plan(plan_dir, ("1",))
         payload = _validator_payload(
             issues=[
                 {
                     "issue_type": prepare_models.REPOSITORY_AMBIGUITY_ISSUE,
-                    "summary": "`foo/bar.py` names more than one repository",
-                    "session_ref": "`foo/bar.py`",
-                    "actual": "the path exists in two sibling repositories",
+                    "summary": "`/var/lib/demo/state.json` is outside the root",
+                    "session_ref": "`/var/lib/demo/state.json`",
+                    "actual": "the path is on another host",
                     "fix": "declare a `## Repositories` registry",
                 }
             ]
         )
         payload["codebase_root"] = str(plans_files.canonicalize_path(self.first))
-        with self.assertRaisesRegex(plans_errors.PlanError, "repository ambiguity"):
-            prepare_validation_store.ingest_validator_output(plan_dir, payload)
+
+        prepare_validation_store.ingest_validator_output(plan_dir, payload)
+
+        stored = prepare_validation_store.load_prepare_validation(plan_dir)
+        assert stored is not None
+        session = stored.session("1")
+        assert session is not None
+        self.assertEqual(
+            [prepare_models.REPOSITORY_AMBIGUITY_ISSUE],
+            [issue.issue_type for issue in session.issues],
+        )
 
 
 class LegacyRepositoryIntentPrepareTests(unittest.TestCase):

@@ -23,7 +23,6 @@ from .prepare_models import (
     LEGACY_PREPARE_VALIDATION_VERSION,
     PREPARE_VALIDATION_FILENAME,
     PREPARE_VALIDATION_VERSION,
-    REPOSITORY_AMBIGUITY_ISSUE,
     PrepareValidation,
     ProposedCorrection,
     SessionValidation,
@@ -128,22 +127,14 @@ def _validate_validation_authority(
     if registry is None:
         if validation.version != LEGACY_PREPARE_VALIDATION_VERSION:
             raise _fail("validator v2 is only valid for a registered plan")
+        # The deterministic footprint and intent checks are the authority on
+        # whether a legacy plan reaches a second repository. A validator's
+        # `repository-ambiguous` issue is a model judgement that routinely
+        # flags runtime paths in no repository at all (another host's files,
+        # application state directories), so it is kept as an ordinary
+        # expansion-note issue and never refuses the batch on its own.
         _require_legacy_repository_footprint(canonical_dir, validation.codebase_root)
         _require_legacy_repository_intent(canonical_dir, validation.codebase_root)
-        ambiguous = sorted(
-            {
-                session.session_id.value
-                for session in validation.sessions
-                for issue in session.issues
-                if issue.issue_type == REPOSITORY_AMBIGUITY_ISSUE
-            }
-        )
-        if ambiguous:
-            raise _fail(
-                "the validator reported repository ambiguity in sessions "
-                f"{', '.join(ambiguous)}; declare a `## Repositories` registry "
-                "before expanding this plan"
-            )
         return None
 
     if validation.version != PREPARE_VALIDATION_VERSION:

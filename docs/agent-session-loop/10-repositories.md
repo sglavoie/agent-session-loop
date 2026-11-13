@@ -464,16 +464,22 @@ whole ordered registry.
 
 Validator-output version 1 remains accepted only for legacy single-repository
 plans, and only while the plan actually is one. The legacy packet names its
-`codebase_root` as the sole bound root and instructs the validator to report any
-path resolving outside it as a `repository-ambiguous` issue. Before a version 1
+`codebase_root` as the sole bound root and asks the validator to report a path
+as a `repository-ambiguous` issue only when it resolves inside another Git
+repository; paths on another host, operating-system or application state
+directories, and files outside every Git repository are not repository claims.
+Before a version 1
 packet is built, and again before its output is ingested, `prepare` recomputes
 the plan's repository footprint against that root; a plan reaching a second
 repository is refused. `asl prepare` reports that refusal as
 `validation-failed` with a plain validation blocker, while `asl
 expand-ingest` refuses it with the dedicated reason `repository-footprint`
 rather than `validator-schema`, its error payload carrying the same
-`repository_footprint` object preflight emits. A version 1 payload that itself
-reports `repository-ambiguous` is refused for the same reason.
+`repository_footprint` object preflight emits. Those deterministic checks are
+the authority: a version 1 payload that itself reports `repository-ambiguous`
+is ingested, and the issue is kept in the session's expansion notes rather than
+refusing the batch, because a validator's judgement routinely flags runtime
+paths that belong to no repository.
 
 The plan's repository *intent* is recomputed at the same two points, and is
 refused with the reason `repository-registry-required`; `expand-ingest`'s error

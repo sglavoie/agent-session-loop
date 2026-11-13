@@ -225,9 +225,13 @@ class ValidationTaskPacket:
                         "plan. Use locations relative to it."
                     ),
                     (
-                        "- Report any path that resolves outside that root, or "
-                        "that names a second repository, as an issue with "
-                        f"issue_type={REPOSITORY_AMBIGUITY_ISSUE}."
+                        "- Report a path as an issue with "
+                        f"issue_type={REPOSITORY_AMBIGUITY_ISSUE} only when it "
+                        "resolves inside a Git repository other than that root. "
+                        "Paths on another host, operating-system or application "
+                        "state directories, and files outside every Git "
+                        "repository are not repository claims; do not report "
+                        "them as this issue."
                     ),
                 ]
             )

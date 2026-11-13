@@ -372,6 +372,7 @@ module = [
     "agent_session_loop.prepare_results",
     "agent_session_loop.prepare_structure",
     "agent_session_loop.prepare_validation_cache",
+    "agent_session_loop.prepare_validation_rejections",
     "agent_session_loop.prepare_validation_stage",
     "agent_session_loop.prepare_validation_store",
     "agent_session_loop.prepare_validation_support",

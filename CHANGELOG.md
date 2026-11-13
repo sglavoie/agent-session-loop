@@ -34,6 +34,16 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- `asl prepare` no longer refuses a single-repository plan because a
+  validator reported `repository-ambiguous` for paths that belong to no
+  repository, such as files on another host or application state
+  directories. The deterministic footprint and intent checks remain the
+  authority on a second repository; the validator's report is kept in the
+  expansion notes, and the legacy packet now asks for it only for a path inside
+  another Git repository. Multi-repository (registered) plans are unchanged.
+- A rejected validator batch now leaves its answer and error in
+  `prepare-validation-rejected.json` beside the plan, named in the failure
+  message, instead of only a stderr line. Each new validation wave clears it.
 - The supervisor audit's `commit-after-verification` check no longer reports
   a head move the turn's own write guard caught as an out-of-scope violation as
   commits the refused turn kept: the writer of a caught move is unknown, and

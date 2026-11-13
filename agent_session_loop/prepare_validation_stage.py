@@ -29,6 +29,11 @@ from .prepare_validation_cache import (
     load_prepare_validation_cache,
     save_prepare_validation_cache,
 )
+from .prepare_validation_rejections import (
+    ValidatorOutputRejected,
+    clear_rejections,
+    record_rejection,
+)
 from .prepare_validation_store import (
     _validate_validation_authority,
     load_prepare_validation,
@@ -138,7 +143,9 @@ def _run_validation_stage(
 
     newly_validated = sum(len(batch) for _ordinal, batch, _packet in worker_batches)
     failures: dict[int, Exception] = {}
+    evidence: dict[int, Path] = {}
     if worker_batches:
+        clear_rejections(plan_dir)
         next_batch = 0
         in_flight: dict[Future[object], tuple[int, tuple[str, ...]]] = {}
         with ThreadPoolExecutor(max_workers=validator_jobs) as executor:
@@ -182,6 +189,7 @@ def _run_validation_stage(
 
                 for future in sorted(done, key=lambda item: in_flight[item][0]):
                     ordinal, batch = in_flight.pop(future)
+                    payload: object = None
                     try:
                         payload = future.result()
                         update = parse_validator_output(payload)
@@ -217,6 +225,26 @@ def _run_validation_stage(
                     except Exception as error:  # noqa: BLE001 - worker boundary
                         failures[ordinal] = error
                         detail = str(error)
+                        output = (
+                            error.output
+                            if isinstance(error, ValidatorOutputRejected)
+                            else payload
+                        )
+                        if output is not None:
+                            try:
+                                evidence[ordinal] = record_rejection(
+                                    plan_dir,
+                                    batch=ordinal,
+                                    session_ids=batch,
+                                    error=error,
+                                    output=output,
+                                )
+                            except PlanError as record_error:
+                                detail += (
+                                    f" (rejected output not saved: {record_error})"
+                                )
+                            else:
+                                detail += f" (rejected output: {evidence[ordinal]})"
                         _validation_progress(
                             (
                                 f"batch {ordinal}/{len(all_batches)} failed"
@@ -251,6 +279,16 @@ def _run_validation_stage(
         if failures:
             first_ordinal = min(failures)
             failure = failures[first_ordinal]
+            # Only a plain rejection gains the evidence path in its message;
+            # typed refusals (footprint, registry) keep their class so callers
+            # still report their dedicated reasons.
+            if first_ordinal in evidence and type(failure) in (
+                PlanError,
+                ValidatorOutputRejected,
+            ):
+                raise PlanError(
+                    f"{failure} (rejected validator output: {evidence[first_ordinal]})"
+                ) from failure
             if isinstance(failure, (PlanError, harnesses.HarnessError)):
                 raise failure
             raise PlanError(

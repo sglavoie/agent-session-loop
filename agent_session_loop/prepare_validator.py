@@ -12,6 +12,7 @@ from . import harnesses
 from .plans_errors import PlanError
 from .prepare_packet import ValidationTaskPacket
 from .prepare_parsing import _fail, parse_validator_output
+from .prepare_validation_rejections import ValidatorOutputRejected
 
 ValidatorRunner = Callable[[ValidationTaskPacket], object]
 
@@ -96,7 +97,7 @@ def _launch_validator(
             parse_validator_output(payload)
         except PlanError as error:
             if attempt == VALIDATOR_REPAIR_ATTEMPTS:
-                raise
+                raise ValidatorOutputRejected(str(error), output=text) from error
             print(
                 f"asl prepare: validator output rejected ({error}); asking "
                 f"{harness_name} to repair it "
