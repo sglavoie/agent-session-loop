@@ -167,5 +167,45 @@ class ReviewRepairContractGateTests(ContractGateFixtures, unittest.TestCase):
         self.assertFalse((self.plan_dir / "session-2.1.md").exists())
 
 
+class CompletedSessionBaselineTests(ContractGateFixtures, unittest.TestCase):
+    """ASI-6: a completed session's satisfied ``fail`` baseline keeps the child."""
+
+    def test_a_completed_sessions_now_passing_fail_baseline_keeps_the_child(
+        self,
+    ) -> None:
+        # The child's own check still fails, as its baseline expects.
+        self._write_plan_with_check(
+            {
+                "type": "command",
+                "name": "child-check",
+                "baseline_expectation": "fail",
+                "argv": ["python3", "-c", "raise SystemExit(1)"],
+            }
+        )
+        # Session 1 expected its check to fail before its work. The work is
+        # done (README.md exists), so the check now passes, which is the shape
+        # the live run withdrew its only repair child over.
+        session_one = self.plan_dir / "session-1.md"
+        session_one.write_text(
+            session_one.read_text(encoding="utf-8").replace(
+                '"name": "readme-1"',
+                '"name": "readme-1", "baseline_expectation": "fail"',
+            ),
+            encoding="utf-8",
+        )
+        progress_repair.repair_progress_journal(self.plan_dir)
+
+        result = self._materialize()
+
+        self.assertTrue(result.loop_ready, msg=str(result.blockers))
+        self.assertFalse(result.rolled_back)
+        self.assertEqual(("2.1",), tuple(c.session_id.value for c in result.children))
+        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
+        self.assertIn(
+            "**Readiness**: loop-ready",
+            (self.plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
