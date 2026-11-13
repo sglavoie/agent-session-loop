@@ -10,7 +10,6 @@
           "frame-too-large",
           "internal-error",
           "mutation-failed",
-          "workbench-unavailable",
           "invalid-plan",
           "no-active-run",
           "run-mismatch",
@@ -39,7 +38,6 @@
           "run.resume",
           "run.stop_after_current",
           "run.abort",
-          "workbench.ensure",
           "run.redirect",
           "run.redirect_status",
           "run.recover_conversation"
@@ -90,8 +88,8 @@
       },
       "components": {
         "bridge_protocol": {
-          "digest": "cc9fabeeb9729da495ae18e3d0a8712099c599f7dd655384a8b7fdbf455f4beb",
-          "fixture_count": 27,
+          "digest": "d77815b8a85f1761ac1b85c708e898f2c1bd0957b739e3dde1628b82a1824795",
+          "fixture_count": 26,
           "max_document_bytes": 1048576,
           "roots": [
             "error_response",
@@ -104,8 +102,7 @@
             "redirect_receipt_response",
             "redirect_status_response",
             "runs_changed_event",
-            "runs_snapshot_response",
-            "workbench_link_response"
+            "runs_snapshot_response"
           ],
           "schema_path": "schemas/bridge-protocol-v2.json",
           "schema_version": 2
@@ -131,16 +128,16 @@
           "schema_version": 1
         }
       },
-      "contract_set_id": "asl-amx-1.d0c0c70abf623b3e",
-      "corpus_digest": "d0c0c70abf623b3e771744ddf57e8450086b3ff7ae2f31ec7d449128d6093ea9",
+      "contract_set_id": "asl-amx-1.827fc9974d8f37c0",
+      "corpus_digest": "827fc9974d8f37c04328dd45521e80892554284ccf009fef91ba2eb8f8082ef7",
       "status": "current"
     }
   ],
-  "current_contract_set_id": "asl-amx-1.d0c0c70abf623b3e",
+  "current_contract_set_id": "asl-amx-1.827fc9974d8f37c0",
   "files": {
     "fixtures/bridge-protocol-v2/invalid/error-unknown-code.json": "d7137e07022b3ad8c5d67e421088de01dc6bb0c33137130f68b06bcbadc81459",
-    "fixtures/bridge-protocol-v2/invalid/hello-protocol-1.json": "9f89f9d6919a5f5eaab4f47b501925cadcaf4c6442822d3fd1291feabc4766e7",
-    "fixtures/bridge-protocol-v2/invalid/hello-unknown-capability.json": "896506c17eeb4d780b36c18bbaec13b2c8108dc0943a64d5c4fc9a8cad941b84",
+    "fixtures/bridge-protocol-v2/invalid/hello-protocol-1.json": "746447d4af8cda45aba08f679a7fc026c1245fd2fabce8eb4bc790ef09c2970f",
+    "fixtures/bridge-protocol-v2/invalid/hello-unknown-capability.json": "edd8fb6461fb3e68ec5ba5193d3cbd151fc56b2f8ab491d698283a3dd2577340",
     "fixtures/bridge-protocol-v2/invalid/operation-invalid-status.json": "b356f81926cf27ad2c1b43fd335e92bcadee9dccce848129bde5b8d772822a91",
     "fixtures/bridge-protocol-v2/invalid/operation-oversized-detail.json": "7bf8b1b0c0676473b5b13bdf858ee76a226aa46694bb31b66466e4a2127571b2",
     "fixtures/bridge-protocol-v2/invalid/recovery-auto-resume-decision.json": "86f0768acf60d6b6f06d7867be4f36b0f280f5964da224ffe8baf0ef3fffbb93",
@@ -148,13 +145,13 @@
     "fixtures/bridge-protocol-v2/invalid/redirect-feedback-leak.json": "3d83edcd9f6cbee9fa875ac4e2b0169db85fd8cfce3ed6a4b89e67b0b5212498",
     "fixtures/bridge-protocol-v2/invalid/redirect-operation-status-confusion.json": "e219472f4d682d9bd26342feca1332fa12abd5e143651645172b872083906e69",
     "fixtures/bridge-protocol-v2/invalid/redirect-unknown-stage.json": "7e603a9a389246a07ae96ae8b517dca0d8e13c2a45090374c316c2bac74262dd",
+    "fixtures/bridge-protocol-v2/invalid/snapshot-harness-pattern.json": "dfbff2e71188242f8f61d18ad72b574bf3ebe0128faa0414c573bb336c28e3eb",
     "fixtures/bridge-protocol-v2/invalid/snapshot-question-body-leak.json": "b3a2331dd96e682d8923c1f57a60794ae799f217d2e34578d5f7fa2b09ea680d",
     "fixtures/bridge-protocol-v2/invalid/snapshot-too-many-warnings.json": "45750c6c53b2d872cecb03b9ea074b972d068f889ef5bfd48153a7a116e535b5",
     "fixtures/bridge-protocol-v2/invalid/snapshot-unknown-row-field.json": "96f318bef880f94b7e7c0cc9e30b3230029bcb870b9977e204efc81ce857e984",
-    "fixtures/bridge-protocol-v2/invalid/workbench-nonloopback-url.json": "2e657d18b51967067733ccf48cd3896a567b64763be6cf250e1a735382a45ea6",
     "fixtures/bridge-protocol-v2/valid/handshake-accepted.json": "e98ac138d2c1d0516fdee3e4920eb0cc19fa39ce2b61fc9328912a49f05c878b",
     "fixtures/bridge-protocol-v2/valid/handshake-read-only.json": "66e74a819f3c03cc4adc576a7e401f15e50334786e0573c3f8c89ad2f210d491",
-    "fixtures/bridge-protocol-v2/valid/hello.json": "f508679366d3704ce9047ab65c873ee61bfb52f7d32f483b1fa25b0373652088",
+    "fixtures/bridge-protocol-v2/valid/hello.json": "c84812d28fcc8c1f287fd8a0baccdbdaaef902cf0403eb9c3ad6e48f4c3f60e4",
     "fixtures/bridge-protocol-v2/valid/operation-receipt.json": "4d9a3af4b5f0ecd92ec918c1ee1defd4f1a927dce211e95e7f307a27e0ff62dc",
     "fixtures/bridge-protocol-v2/valid/operation-updated-event.json": "415a10050d569e8cceef612fecd46e0b8f0e1ceb519c0dd73284fb3c6ea58534",
     "fixtures/bridge-protocol-v2/valid/question-body.json": "b029bfce4202b7a921f5d725a35250b6dc3f39d178ca6d6f9e1bf6281f39e80b",
@@ -164,7 +161,6 @@
     "fixtures/bridge-protocol-v2/valid/runs-changed-event.json": "bdcced2c7ba33f6a120045ff2ee4a6f98e9e5451291337795c1da657ffa543ef",
     "fixtures/bridge-protocol-v2/valid/runs-snapshot.json": "6cf2e488db33eab62813b887a5d3566f4e2652e4da971e5a4b182e5586a303e7",
     "fixtures/bridge-protocol-v2/valid/stale-action-token-error.json": "2ed80ce258dd0fb2990302c6160bf3ed57b86f83b3260f6ed723b922161465ad",
-    "fixtures/bridge-protocol-v2/valid/workbench-link.json": "6448f0208014b19b79d1e05bb744f7abdd60adecb29f32f407463b0fc8219b63",
     "fixtures/lifecycle-hook-v2/invalid/invalid-event.json": "2f64390842f2dc1533c1e4afd7ac645d58eed30ff3845a51118bc43e763d5fda",
     "fixtures/lifecycle-hook-v2/invalid/missing-contract-set-id.json": "0a76636b0eae464658baadc9aa45688d87a6f14c420475398372ba4dd8afbff4",
     "fixtures/lifecycle-hook-v2/invalid/numeric-source-sequence.json": "4bcc3545ea2f380164f9f1171e284e70f3b1cc0f405deef2315d811afac92f83",
@@ -190,7 +186,7 @@
     "fixtures/projection-v1/valid/finished-unregistered.json": "5256abeb72343a60fcd4122992740025d0486d82f4d9428dd348ace5dc5eb106",
     "fixtures/projection-v1/valid/live-turn.json": "f52a3edc3b4c1e87e5e547e5cf51b07b8545a08b6e04fce99a64b790d0478348",
     "fixtures/projection-v1/valid/paused-after-finish.json": "8e7463b94e5a75b7de2038bc0a42831e0f2be9be27d7773778cf18204eefdef7",
-    "schemas/bridge-protocol-v2.json": "cc9fabeeb9729da495ae18e3d0a8712099c599f7dd655384a8b7fdbf455f4beb",
+    "schemas/bridge-protocol-v2.json": "d77815b8a85f1761ac1b85c708e898f2c1bd0957b739e3dde1628b82a1824795",
     "schemas/lifecycle-hook-v2.json": "54e8d5c8fbdea29d4591d1aa8037493b1fe9d8848b87287b6a2e67fb1d8ce150",
     "schemas/projection-v1.json": "72cfb13510d1a06ce15f6803464ef6527e81a4557d38ade85a382b289e9718c5"
   },

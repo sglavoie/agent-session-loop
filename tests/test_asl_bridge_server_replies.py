@@ -18,9 +18,9 @@ from agent_session_loop import (
     mailbox_appenders,
     mailbox_cursors,
     mailbox_vocabulary,
+    plan_launch,
     redirect_store_vocab,
     state,
-    workbench_launch,
 )
 
 from .asl_bridge_server_support import (
@@ -476,8 +476,8 @@ class BridgeStaleRequestTests(unittest.TestCase):
                 spawned.append((args, kwargs))
                 raise AssertionError("a stale resume must not spawn")
 
-            original = workbench_launch.launch_plan
-            workbench_launch.launch_plan = _refuse  # type: ignore[assignment]
+            original = plan_launch.launch_plan
+            plan_launch.launch_plan = _refuse  # type: ignore[assignment]
             try:
                 with self.assertRaises(bridge_protocol.BridgeError) as caught:
                     corpus.session().run_resume(
@@ -489,7 +489,7 @@ class BridgeStaleRequestTests(unittest.TestCase):
                         }
                     )
             finally:
-                workbench_launch.launch_plan = original  # type: ignore[assignment]
+                plan_launch.launch_plan = original  # type: ignore[assignment]
 
             self.assertEqual(
                 intervention.REASON_STALE_ACTION_TOKEN, caught.exception.code

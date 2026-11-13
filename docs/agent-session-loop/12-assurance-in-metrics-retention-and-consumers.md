@@ -150,14 +150,14 @@ pins, and the deletion it would otherwise license is unrecoverable. A ledger
 file that does not exist yet is not this case — that is a readable empty inbox,
 and it pins nothing.
 
-The Workbench summary and the Autopilot supervision result carry the same
+Plan summaries and the Autopilot supervision result carry the same
 verdict in bounded form: state, eligibility, reason, up to eight issue IDs with
 `issue_ids_truncated` when there are more, the new and recurring counts, the
 partial flag, the one-line status text, and the inbox command. Neither carries a
 field with which to configure, launch, retry, or dispose of an audit, and the
 Autopilot's human summary names what the audit found rather than deciding
 anything about it. All existing state, event, status, metrics, retention,
-Workbench, and Autopilot fields keep their meaning; every field described here
+plan-summary, and Autopilot fields keep their meaning; every field described here
 is additive.
 
 ### Execution timing accounting

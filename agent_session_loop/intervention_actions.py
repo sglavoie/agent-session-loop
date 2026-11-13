@@ -93,7 +93,6 @@ def permitted_actions(facts: RunFacts) -> tuple[str, ...]:
         # acted on it anyway. Mirrors `run.resume`, which is permitted on a
         # paused run and can still fail at launch.
         allowed.append(ACTION_REDIRECT)
-    allowed.append(ACTION_WORKBENCH)
     return tuple(action for action in ACTIONS if action in allowed)
 
 

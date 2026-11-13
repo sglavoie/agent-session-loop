@@ -1,4 +1,4 @@
-"""Run control, abort, and workbench redirect docs regression tests."""
+"""Run control and abort docs regression tests."""
 
 from __future__ import annotations
 
@@ -311,89 +311,6 @@ class ControlAndAbortDocsTests(unittest.TestCase):
         self.assertIn("`capped`, `worker_hung`, `status-error`", guide)
         for section in (autopilot_docs, guide):
             self.assertIn("skills/asl/references/quota-and-hangs.md", section)
-
-    def test_docs_describe_the_workbench_abort_endpoint(self) -> None:
-        docs = self._read("docs/agent-session-loop.md")
-        normalized = " ".join(docs.split())
-
-        self.assertIn(
-            "`POST /api/control/abort` — enqueue a `request-abort-turn` command.",
-            normalized,
-        )
-        self.assertIn(
-            "so an out-of-range window returns `invalid-grace` and an empty "
-            "reason returns `invalid-reason`",
-            normalized,
-        )
-        self.assertIn(
-            "it has no receipt equivalent of `asl control abort --wait`: the "
-            "HTTP surface confirms the append, never the runner's observation",
-            normalized,
-        )
-
-    def test_docs_describe_the_workbench_redirect_endpoint(self) -> None:
-        """The HTTP correction path, including what its status codes promise."""
-        docs = self._read("docs/agent-session-loop.md")
-        normalized = " ".join(docs.split())
-
-        for marker in (
-            "`POST /api/control/redirect` — submit one urgent correction "
-            "against the turn the run is on now",
-            "`202` with `accepted` and a `redirect` receipt when anything was "
-            "persisted",
-            "`409` when nothing was persisted",
-            "The response carries `feedback_digest` and `feedback_bytes`, "
-            "never the correction text.",
-            "A redirect is deliberately not a checkpoint command",
-        ):
-            self.assertIn(
-                marker,
-                normalized,
-                msg=f"docs omit workbench redirect marker: {marker!r}",
-            )
-
-    def test_docs_describe_the_workbench_redirect_reads(self) -> None:
-        """The two reads, and that the recovery one performs no recovery."""
-        docs = self._read("docs/agent-session-loop.md")
-        normalized = " ".join(docs.split())
-
-        for marker in (
-            "`GET /api/redirect-status?plan_dir=<path>` — durable redirect "
-            "operations for one plan",
-            "`GET /api/conversation-recovery?plan_dir=<path>` — which "
-            "recovery an unresumable conversation is waiting on",
-            "The endpoint performs no recovery: doing so would persist a "
-            "one-use operator authorization in a request a browser can "
-            "replay",
-            "`/api/redirect-status`, `/api/conversation-recovery`) are "
-            "**not** authenticated",
-        ):
-            self.assertIn(
-                marker,
-                normalized,
-                msg=f"docs omit workbench redirect-read marker: {marker!r}",
-            )
-
-    def test_docs_describe_the_workbench_launch_idempotency_key(self) -> None:
-        """``launch_id``, and the durable journal the receipt now comes from."""
-        docs = self._read("docs/agent-session-loop.md")
-        normalized = " ".join(docs.split())
-
-        for marker in (
-            "accept an optional `launch_id` bounded by "
-            "`redirect_store_vocab.REDIRECT_MAX_OPERATION_ID_CHARS`",
-            "both routes admit through the plan's operation journal, so a "
-            "resend is idempotent across Workbench processes and across a "
-            "restart, not only within the process that spawned",
-            '`reason: "launch-already-in-flight"` while a process this '
-            "server started for the plan is still alive",
-            "A paused run is not a conflict: resuming one is what `/api/reply` is for.",
-        ):
-            self.assertIn(
-                marker,
-                normalized,
-                msg=f"docs omit launch idempotency marker: {marker!r}",
-            )
 
 
 if __name__ == "__main__":

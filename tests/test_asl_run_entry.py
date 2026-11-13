@@ -18,7 +18,7 @@ Four contracts:
   boundary publishes.
 * The delegation contract -- `runner.run_from_args` stays a two-line shim with
   the same name and signature, because `cli.py` reaches it through the string
-  `handler_ref="runner:run_from_args"` and `workbench_launch.py`, `maintenance.py`
+  `handler_ref="runner:run_from_args"` and `plan_launch.py`, `maintenance.py`
   and `skills/asl/scripts/asl_autopilot.py` call it by name. The shim's whole job is
   to supply the one collaborator this module may not import.
 * The seam contract -- `run_locked` is required and keyword-only, and

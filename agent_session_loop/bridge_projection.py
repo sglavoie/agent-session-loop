@@ -1,6 +1,6 @@
 """Row and snapshot projection for the bridge.
 
-Turns Workbench summaries into the bounded, body-free rows a snapshot carries,
+Turns plan summaries into the bounded, body-free rows a snapshot carries,
 including the redirect-journal projection. Nothing here writes.
 """
 
@@ -18,15 +18,15 @@ from . import (
     mailbox,
     mailbox_models,
     mailbox_snapshot,
+    plan_pins_models,
+    plan_scan,
+    plan_summary,
+    plan_summary_model,
     qna_values,
     redirect_recovery,
     state,
     state_locks,
     state_payloads,
-    workbench_discovery,
-    workbench_registry_models,
-    workbench_summary,
-    workbench_summary_model,
 )
 from .agent_mux_projection import CONTRACT_SET_ID
 from .bridge_protocol import (
@@ -132,7 +132,7 @@ def _question_projection(
             )
             if active_wait is not None and active_wait.to in open_ids:
                 # ``input_wait_active`` is a heartbeat observation.  A
-                # connector poll can land between heartbeats even while the
+                # client poll can land between heartbeats even while the
                 # worker remains blocked in ``asl ask --wait``.  The paired
                 # mailbox wait is durable for exactly that blocked interval,
                 # so it is the authoritative tie-breaker for the same live
@@ -194,7 +194,7 @@ def _question_projection(
 
 
 def _phase(
-    primary_state: workbench_summary_model.PrimaryState,
+    primary_state: plan_summary_model.PrimaryState,
     question: Mapping[str, Any] | None,
 ) -> Phase:
     if (
@@ -207,11 +207,11 @@ def _phase(
 
 
 def project_row(
-    summary: workbench_summary_model.WorkbenchSummary,
+    summary: plan_summary_model.PlanSummary,
     *,
     state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Project one active/actionable Workbench summary into a snapshot row.
+    """Project one active/actionable plan summary into a snapshot row.
 
     Free-form summary prose is never copied. ``concise_reason``, ``detail``,
     ``pause_message``, ``last_message_preview``, and ``searchable_text`` all
@@ -285,7 +285,7 @@ def project_row(
 
 
 def _row_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Order rows exactly as the Workbench queue orders its default view.
+    """Order rows by urgency, the way an operator should triage them.
 
     Urgency tier first, freshest activity within a tier, then label; the plan
     directory breaks the remaining ties so the projection is total rather than
@@ -335,20 +335,20 @@ def build_runs_snapshot(
     warnings: list[str] = []
     rows: list[dict[str, Any]] = []
     try:
-        discovery = workbench_discovery.discover_plans(
+        discovery = plan_scan.discover_plans(
             state_root=state_dir,
             plan_roots=plan_roots,
             include_default_dirs=include_default_dirs,
         )
-    except (workbench_registry_models.WorkbenchError, OSError, ValueError) as error:
-        discovery = workbench_registry_models.DiscoveryResult(
+    except (plan_pins_models.PlanRegistryError, OSError, ValueError) as error:
+        discovery = plan_pins_models.DiscoveryResult(
             warnings=(f"discovery failed: {error}",)
         )
     warnings.extend(discovery.warnings)
 
     for discovered in discovery.plans:
         try:
-            summary = workbench_summary.build_workbench_summary(
+            summary = plan_summary.build_plan_summary(
                 discovered, state_dir=state_dir, reclaim=False
             )
             if summary.primary_state not in ACTIVE_PRIMARY_STATES:

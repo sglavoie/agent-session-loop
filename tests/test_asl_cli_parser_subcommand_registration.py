@@ -11,7 +11,6 @@ from . import (
     asl_cli_parser_subcommand_registration_help,
     asl_cli_parser_subcommand_registration_numeric,
     asl_cli_parser_subcommand_registration_spelling,
-    asl_cli_parser_subcommand_registration_workbench,
 )
 
 
@@ -31,12 +30,6 @@ class ParserFlagSpellingTests(
 
 class NumericFlagValidationTests(
     asl_cli_parser_subcommand_registration_numeric.NumericFlagValidationTests,
-):
-    """Preserve the established test IDs."""
-
-
-class WorkbenchGroupFlagTests(
-    asl_cli_parser_subcommand_registration_workbench.WorkbenchGroupFlagTests,
 ):
     """Preserve the established test IDs."""
 

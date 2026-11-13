@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from asl_workbench import controls as control_rules
-
-from . import intervention, redirect_cli, workbench_controls
+from . import control_rules, control_service, intervention, redirect_cli
 from .bridge_errors import (
     _control_error,
     _optional_id_list,
@@ -47,15 +45,15 @@ class RedirectHandlers(MutationHandlers):
         other end.
         """
         try:
-            return workbench_controls.wait_seconds(
+            return control_service.wait_seconds(
                 params.get("wait_seconds"), label="params.wait_seconds"
             )
-        except workbench_controls.ControlRefused as error:
+        except control_service.ControlRefused as error:
             raise _control_error(error) from error
 
     @staticmethod
     def _redirect_payload(
-        submission: workbench_controls.RedirectSubmission,
+        submission: control_service.RedirectSubmission,
     ) -> dict[str, Any]:
         """Answer a redirect request from the journal rather than from memory.
 
@@ -111,7 +109,7 @@ class RedirectHandlers(MutationHandlers):
         the journal is about to be written under.
         """
         try:
-            submission = workbench_controls.submit_correction(
+            submission = control_service.submit_correction(
                 _require_str(params, "plan_dir"),
                 operation_id=_require_str(params, "operation_id"),
                 text=params.get("text"),
@@ -124,7 +122,7 @@ class RedirectHandlers(MutationHandlers):
                 target_label="params.expected_target",
                 wait_label="params.wait_seconds",
             )
-        except workbench_controls.ControlRefused as error:
+        except control_service.ControlRefused as error:
             raise _control_error(error) from error
         return self._redirect_payload(submission)
 
@@ -137,12 +135,12 @@ class RedirectHandlers(MutationHandlers):
         """
         wanted = _optional_id_list(params, "operation_ids")
         try:
-            view = workbench_controls.status_view(
+            view = control_service.status_view(
                 _require_str(params, "plan_dir"),
                 state_dir=self.state_dir,
                 operation_ids=tuple(wanted),
             )
-        except workbench_controls.ControlRefused as error:
+        except control_service.ControlRefused as error:
             raise _control_error(error) from error
         facts = view.facts
         report = view.report
@@ -185,15 +183,15 @@ class RedirectHandlers(MutationHandlers):
 
         The pause-to-decision mapping and both commands are derived from
         :mod:`.intervention` and :mod:`.redirect_cli` rather than re-assembled,
-        so this projection, a recovery card in the Workbench, and ``asl control
-        recover-conversation`` cannot hand an operator three different answers
-        about the same pause.
+        so this projection, a recovery card in ``asl plans --json``, and ``asl
+        control recover-conversation`` cannot hand an operator three different
+        answers about the same pause.
         """
         try:
-            view = workbench_controls.recovery_view(
+            view = control_service.recovery_view(
                 _require_str(params, "plan_dir"), state_dir=self.state_dir
             )
-        except workbench_controls.ControlRefused as error:
+        except control_service.ControlRefused as error:
             raise _control_error(error) from error
         facts = view.facts
         classified = view.decision

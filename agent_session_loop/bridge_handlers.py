@@ -1,24 +1,23 @@
-"""Question, control, and Workbench request handlers for the bridge session."""
+"""Question, control, and resume request handlers for the bridge session."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
 
-from asl_workbench import actions as action_rules
-from asl_workbench import controls as control_rules
-
-from . import control_queue, intervention, mailbox_models, workbench_controls
+from . import (
+    action_rules,
+    control_queue,
+    control_rules,
+    control_service,
+    intervention,
+    mailbox_models,
+)
 from .bridge_errors import _bridge_error, _control_error, _optional_str, _require_str
 from .bridge_ledger import OperationLedger
 from .bridge_projection import row_id
 from .bridge_protocol import (
-    ERROR_INVALID_REQUEST,
     ERROR_MUTATION_FAILED,
-    ERROR_WORKBENCH_UNAVAILABLE,
-    WORKBENCH_FOCUS_ACTIVE,
-    WORKBENCH_FOCUS_REPLY,
-    WORKBENCH_FOCUS_VALUES,
     BridgeError,
     _bounded_id,
     _bounded_path,
@@ -26,7 +25,7 @@ from .bridge_protocol import (
 
 
 class MutationHandlers(OperationLedger):
-    """Question, control, and Workbench handlers."""
+    """Question, control, and resume handlers."""
 
     # ----------------------------------------------------------------
     # Methods
@@ -118,7 +117,7 @@ class MutationHandlers(OperationLedger):
     def _control(
         self, params: Mapping[str, Any], kind: str, **kwargs: Any
     ) -> dict[str, Any]:
-        """Queue one control through the service the Workbench also goes through.
+        """Queue one control through the shared control service.
 
         Only the ledger around it is this protocol's: replay out of
         ``self.operations``, and the acceptance row a client settles against.
@@ -132,7 +131,7 @@ class MutationHandlers(OperationLedger):
         if replay is not None:
             return replay
         try:
-            outcome = workbench_controls.dispatch_control(
+            outcome = control_service.dispatch_control(
                 _require_str(params, "plan_dir"),
                 kind,
                 state_dir=self.state_dir,
@@ -142,7 +141,7 @@ class MutationHandlers(OperationLedger):
                 run_id=_optional_str(params, "run_id"),
                 **kwargs,
             )
-        except workbench_controls.ControlRefused as error:
+        except control_service.ControlRefused as error:
             raise _control_error(error) from error
         except (OSError, ValueError) as error:
             raise BridgeError(
@@ -201,32 +200,3 @@ class MutationHandlers(OperationLedger):
             witness_offset=mark,
             request=params,
         )
-
-    def workbench_ensure(self, params: Mapping[str, Any]) -> dict[str, Any]:
-        """Return a tokenized Workbench deep link for one plan."""
-        if self.workbench_lifecycle is None:
-            raise BridgeError(
-                ERROR_WORKBENCH_UNAVAILABLE,
-                "this bridge session cannot host a workbench server",
-            )
-        facts = self._facts(params)
-        focus = _optional_str(params, "focus")
-        if focus is None:
-            focus = (
-                WORKBENCH_FOCUS_REPLY
-                if facts.context_kind is not None
-                else WORKBENCH_FOCUS_ACTIVE
-            )
-        elif focus not in WORKBENCH_FOCUS_VALUES:
-            raise BridgeError(
-                ERROR_INVALID_REQUEST,
-                f"unsupported workbench focus {focus!r}",
-                details={"supported": list(WORKBENCH_FOCUS_VALUES)},
-            )
-        url = self.workbench_lifecycle.url(str(facts.plan_dir), focus)
-        return {
-            "plan_dir": _bounded_path(facts.plan_dir),
-            "row_id": row_id(str(facts.plan_dir), facts.run_id),
-            "focus": focus,
-            "url": url,
-        }

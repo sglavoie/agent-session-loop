@@ -12,17 +12,6 @@ updates:
           - minor
           - patch
 
-  # Development-only Playwright harness for the Workbench shell.
-  - package-ecosystem: npm
-    directory: /tests/workbench_browser
-    schedule:
-      interval: weekly
-    groups:
-      npm-minor-patch:
-        update-types:
-          - minor
-          - patch
-
   # The `dev` dependency group in pyproject.toml pins the lint toolchain (ruff,
   # mypy) that `just lint` and both CI lanes install.
   - package-ecosystem: pip

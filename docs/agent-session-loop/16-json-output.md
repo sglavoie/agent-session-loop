@@ -288,8 +288,7 @@ object. `asl backfill-progress --json` answers `reason: dry-run` with the
 parsed `entries` and the rendered `journal` under `--dry-run`, `reason:
 written` with `entries_written`, `completed_session_ids`, and `progress_path`
 otherwise, and refuses an existing journal without `--force` as `reason:
-progress-exists`. `asl workbench pin` and `asl workbench unpin` accept `--json`
-like `asl workbench registry`, answering `plan_dir` and `registry_path`.
+progress-exists`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `harness`, `harness_config`, `model`,

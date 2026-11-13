@@ -1,6 +1,6 @@
 ### Observational and mutation guarantees
 
-Every read the bridge performs — Workbench summary, Q&A context, lock
+Every read the bridge performs — plan summary, Q&A context, lock
 state, waiting-for-reply status, and every action-validation read —
 passes `reclaim=False`. A dead local lock is classified `stale` and left
 on disk rather than reclaimed, so a snapshot is a function of the corpus
@@ -25,7 +25,7 @@ a corpus exists to prevent.
 `tests/fixtures/agent_mux_contract/fixtures/bridge-protocol-v2/` holds one
 canonical document per message — hello, handshake accepted, handshake
 read-only, snapshot, `runs.changed`, question body, operation receipt,
-`operation.updated`, error response, Workbench link, redirect receipt,
+`operation.updated`, error response, redirect receipt,
 redirect status, recovery options — beside documents the
 schema must reject for a named reason at a named JSON pointer. The
 corpus's `manifest.json` pins the protocol vocabulary (methods, the
@@ -60,8 +60,8 @@ a bridge it can talk to on its first start. The reverse order is safe but
 inert: a client that finds no `asl`, or one that predates the bridge
 subcommand, reports the integration as unavailable and stays read-only
 until ASL is upgraded. The bridge itself has no client-facing migration —
-it adds a subcommand and changes nothing about `asl run`, `asl workbench`,
-the mailbox, or the control queue.
+it adds a subcommand and changes nothing about `asl run`, the mailbox, or the
+control queue.
 
 Capabilities are additive and ordered, and a client feature-detects by
 membership rather than by position, so a newer bridge serving more methods
@@ -260,40 +260,6 @@ maintenance definitions, the harness adapters — is left to the macOS job, whic
 runs `just test-all` on the platform the pair is actually released against, so
 the portable lane never reports a pass it did not earn.
 
-The Workbench shell is checked from two directions, because the claim being made
-is that one front end serves two deployments and half of that claim is only
-observable in a browser. `tests/test_workbench_shell.py` runs in the integration
-lane: it seeds one plan corpus, binds both providers to real loopback sockets
-over it, and asserts that the two serve byte-identical assets and answer the
-same questions about the same plans. `tests/workbench_browser/shell.spec.js`
-drives that shell with Playwright at desktop and phone widths against both
-deployments in turn — the queue, the responsive collapse, every detail pane,
-keyboard navigation, and both historic link formats. Two of its claims are about
-the refresh poll rather than the layout, and they are there because neither is
-visible from a request: a poll that redraws the same answer performs no page
-scroll at all, and a poll that shortens the page still puts the operator back.
-The unconditional restore that came before ate taps on a phone, where WebKit
-reads a document scroll between `touchstart` and `touchend` as a pan and throws
-the tap away. `overview.spec.js` and `interactions.spec.js` sit beside it over
-the same fixture: the overview's sections, facets, history pane and the banners
-for what a page could not see, and the controls bar driven up to the edge of
-every mutation and no further. All three run as
-`npm --prefix tests/workbench_browser test`, against a fixture server the
-Playwright config starts itself (`fixture_server.py`, which binds the two
-deployments on the fixed ports recorded in `scenarios.json` so the config and
-the fixture cannot disagree about where they are).
-
-That harness is development-only and deliberately sealed off from what ships:
-`tests/workbench_browser/package.json` declares an empty `dependencies` and
-carries `@playwright/test` as a dev dependency alone, which
-`tests/test_workbench_shell.py` asserts rather than trusts. Neither deployment
-needs Node — the shell is native ES modules served by Python — and the Pi
-especially must not acquire a JavaScript toolchain because a test harness drifted
-into the runtime. `npm --prefix tests/workbench_browser run test:install` fetches
-the browser engines on a machine that has none; nothing else in the repository
-depends on them being there, so a checkout without Playwright still runs every
-Python lane.
-
 `just reliability-stress` is a fourth lane, and it judges what the other three
 cannot: whether a result still holds when the machine is hostile. It keeps three
 lists rather than one. The correctness scenarios are the ones observed failing
@@ -344,8 +310,8 @@ checkout (it is an Agent Mux recipe, not one here), launches the
 installed `asl bridge serve --stdio --protocol 2` against a throwaway plan and
 state root and checks the hello, the contract-set ID against the vendored
 corpus, the method and mutation lists against the manifest, the handshake and
-its mutation gate, snapshot decoding, body-free action and receipt shapes, the
-Workbench URL shape, and a clean exit. That recipe is opt-in there and fails
+its mutation gate, snapshot decoding, body-free action and receipt shapes, and
+a clean exit. That recipe is opt-in there and fails
 rather than skips when ASL is missing or incompatible, so an unrun check is
 never mistaken for a passing one.
 
@@ -446,5 +412,3 @@ Supervision bridge:
   entry, or spawned process resulted.
 - Request the retired `--protocol 1` and confirm exit code 2 with a stderr
   diagnostic and nothing on stdout.
-
-Workbench browser workflow:

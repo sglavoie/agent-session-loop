@@ -13,30 +13,30 @@ from .asl_typing_ratchet_section_modules import *
 REQUIRED_CHECKED_MODULES = frozenset(
     {
         "agent_session_loop.compact_state",
-        "agent_session_loop.workbench_cli",
-        "agent_session_loop.workbench_discovery",
-        "agent_session_loop.workbench_launch",
-        "agent_session_loop.workbench_recovery_actions",
-        "agent_session_loop.workbench_recovery_build",
-        "agent_session_loop.workbench_recovery_builders_run",
-        "agent_session_loop.workbench_recovery_builders_state",
-        "agent_session_loop.workbench_recovery_conversation",
-        "agent_session_loop.workbench_recovery_evidence_checks",
-        "agent_session_loop.workbench_recovery_evidence_commit",
-        "agent_session_loop.workbench_recovery_models",
-        "agent_session_loop.workbench_recovery_payload",
-        "agent_session_loop.workbench_recovery_review",
-        "agent_session_loop.workbench_recovery_state",
-        "agent_session_loop.workbench_registry",
-        "agent_session_loop.workbench_registry_coerce",
-        "agent_session_loop.workbench_registry_models",
-        "agent_session_loop.workbench_summary",
-        "agent_session_loop.workbench_summary_active",
-        "agent_session_loop.workbench_summary_context",
-        "agent_session_loop.workbench_summary_helpers",
-        "agent_session_loop.workbench_summary_model",
-        "agent_session_loop.workbench_summary_paused",
-        "agent_session_loop.workbench_summary_settled",
+        "agent_session_loop.plans_cli",
+        "agent_session_loop.plan_scan",
+        "agent_session_loop.plan_launch",
+        "agent_session_loop.recovery_card_commands",
+        "agent_session_loop.recovery_card_build",
+        "agent_session_loop.recovery_card_builders_run",
+        "agent_session_loop.recovery_card_builders_state",
+        "agent_session_loop.recovery_card_conversation",
+        "agent_session_loop.recovery_card_evidence_checks",
+        "agent_session_loop.recovery_card_evidence_commit",
+        "agent_session_loop.recovery_card_models",
+        "agent_session_loop.recovery_card_payload",
+        "agent_session_loop.recovery_card_review",
+        "agent_session_loop.recovery_card_state",
+        "agent_session_loop.plan_pins",
+        "agent_session_loop.plan_pins_coerce",
+        "agent_session_loop.plan_pins_models",
+        "agent_session_loop.plan_summary",
+        "agent_session_loop.plan_summary_active",
+        "agent_session_loop.plan_summary_context",
+        "agent_session_loop.plan_summary_helpers",
+        "agent_session_loop.plan_summary_model",
+        "agent_session_loop.plan_summary_paused",
+        "agent_session_loop.plan_summary_settled",
     }
 )
 
@@ -90,13 +90,9 @@ def package_override() -> dict[str, Any]:
     expected = {
         "agent_session_loop",
         "agent_session_loop.*",
-        "asl_workbench",
-        "asl_workbench.*",
     }
     if set(matching[0]["module"]) != expected:
-        raise AssertionError(
-            "the product mypy policy must cover both complete packages"
-        )
+        raise AssertionError("the product mypy policy must cover the complete package")
     return matching[0]
 
 
@@ -311,7 +307,6 @@ class GlobalSuppressionRatchetTests(unittest.TestCase):
             config["files"],
             [
                 "agent_session_loop",
-                "asl_workbench",
                 "tests",
                 "skills/asl/scripts",
                 "skills/session-resplit/scripts",

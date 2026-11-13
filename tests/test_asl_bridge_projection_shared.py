@@ -2,7 +2,7 @@
 # ruff: noqa: F401, I001
 """Read-only stdio bridge: protocol framing and run projection.
 
-Split from tests/test_asl_workbench_summary.py: the bridge reuses Workbench
+Split from tests/test_asl_plan_summary.py: the bridge reuses plan-summary
 classification but owns its own boundary — what a snapshot may contain, what
 observation may touch, and what a malformed client may do to the server loop.
 """
@@ -34,16 +34,16 @@ from agent_session_loop import (
     mailbox_waits,
     plans_files,
     state,
-    workbench_discovery,
-    workbench_registry_models,
-    workbench_summary,
-    workbench_summary_model,
+    plan_scan,
+    plan_pins_models,
+    plan_summary,
+    plan_summary_model,
 )
 
 from .support import (
-    _WORKBENCH_DEAD_PID,
+    _SUMMARY_DEAD_PID,
     _discovered,
-    _make_workbench_plan,
+    _make_summary_plan,
     _write_lock_file,
     _write_state_payload,
     write_plan,

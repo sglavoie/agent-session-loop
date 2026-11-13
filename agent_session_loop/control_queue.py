@@ -1,7 +1,8 @@
 """Durable external control queue for active runners.
 
-External producers (such as the Workbench HTTP API) append commands to a
-per-plan JSONL queue file under the runner state directory. The active
+External producers (such as ``asl control`` and the supervision bridge)
+append commands to a per-plan JSONL queue file under the runner state
+directory. The active
 runner drains the queue between lifecycle checkpoints and translates
 accepted commands into the same ``RunControlAction`` transitions that
 the in-process keyboard listener already emits, so events and the
@@ -13,7 +14,7 @@ exclusive lock around the drain (read + truncate). The file lives in
 the same directory as ``state.json`` and ``lock.json`` so the existing
 plan-state ownership semantics apply.
 
-Workbench callers must never mutate ``state.json`` directly: enqueue a
+External callers must never mutate ``state.json`` directly: enqueue a
 command here and let the runner own the state transition.
 """
 

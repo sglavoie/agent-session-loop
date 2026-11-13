@@ -183,7 +183,7 @@ def replay_conflict(
 
     :func:`submit_request` already refuses an operation id that names different
     content, and that refusal is the rule. This function exists because the
-    public surfaces never reach it: a browser or a bridge client whose response
+    public surfaces never reach it: a CLI caller or a bridge client whose response
     was lost retries the whole request, so those surfaces answer an id the
     journal already holds *before* re-checking a freshness proof the landed
     correction itself invalidated. That short-circuit is what makes a retry

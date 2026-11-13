@@ -1,6 +1,0 @@
-{
-  "direction": "up",
-  "error": "malformed",
-  "frame": "{\"protocol\": 1, ",
-  "why": "Not JSON at all."
-}

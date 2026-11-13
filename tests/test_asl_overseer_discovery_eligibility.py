@@ -13,7 +13,7 @@ from tests.asl_overseer_discovery_support import (
     _repositories,
 )
 
-from .support import _WORKBENCH_DEAD_PID
+from .support import _SUMMARY_DEAD_PID
 
 ASL_TEST_PORTABLE = True
 
@@ -223,7 +223,7 @@ class IncompleteEvidenceTests(unittest.TestCase):
         corpus = _Corpus(self)
         plan_dir = corpus.write_run("plan-alpha", run_finished_at=None)
         corpus.write_lock(
-            plan_dir, pid=_WORKBENCH_DEAD_PID, hostname=socket.gethostname()
+            plan_dir, pid=_SUMMARY_DEAD_PID, hostname=socket.gethostname()
         )
 
         candidate = corpus.only()

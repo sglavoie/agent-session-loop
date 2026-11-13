@@ -4,7 +4,7 @@ Everything else in this package runs *inside* a run. This boundary owns the
 outside of it — the stretch between the CLI handing over a parsed namespace and
 the loop taking the plan's lock, plus the single line that returns its exit
 code. It is the package's public entry: ``cli.py`` reaches it by the string
-``handler_ref="runner:run_from_args"``, and ``workbench_launch.py`` and
+``handler_ref="runner:run_from_args"``, and ``plan_launch.py`` and
 ``skills/asl/scripts/asl_autopilot.py`` start an ``asl run`` child process that
 arrives through that same string, so the name and the signature are a contract,
 not an implementation detail.

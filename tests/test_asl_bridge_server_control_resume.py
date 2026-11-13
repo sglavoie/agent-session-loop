@@ -16,8 +16,8 @@ from agent_session_loop import (
     bridge_session_state,
     control_queue,
     intervention,
+    plan_launch,
     state,
-    workbench_launch,
 )
 
 from .asl_bridge_server_support import (
@@ -133,7 +133,7 @@ class BridgeResumeTests(unittest.TestCase):
 
             def _capture(target: Any, **kwargs: Any) -> Any:
                 calls.append({"plan_dir": target, **kwargs})
-                return workbench_launch.LaunchResult(
+                return plan_launch.LaunchResult(
                     pid=4242,
                     argv=("python3", "-m", "agent_session_loop", "run"),
                     plan_dir=Path(target),
@@ -144,8 +144,8 @@ class BridgeResumeTests(unittest.TestCase):
                     state_dir=None,
                 )
 
-            original = workbench_launch.launch_plan
-            workbench_launch.launch_plan = _capture  # type: ignore[assignment]
+            original = plan_launch.launch_plan
+            plan_launch.launch_plan = _capture  # type: ignore[assignment]
             try:
                 result = corpus.session().run_resume(
                     {
@@ -156,7 +156,7 @@ class BridgeResumeTests(unittest.TestCase):
                     }
                 )
             finally:
-                workbench_launch.launch_plan = original  # type: ignore[assignment]
+                plan_launch.launch_plan = original  # type: ignore[assignment]
 
             self.assertEqual(bridge_protocol.OPERATION_ACCEPTED, result["status"])
             self.assertEqual(1, len(calls))
@@ -174,7 +174,7 @@ class BridgeResumeTests(unittest.TestCase):
 
             def _capture(target: Any, **kwargs: Any) -> Any:
                 spawns.append(target)
-                return workbench_launch.LaunchResult(
+                return plan_launch.LaunchResult(
                     pid=4242,
                     argv=(),
                     plan_dir=Path(target),
@@ -191,13 +191,13 @@ class BridgeResumeTests(unittest.TestCase):
                 "action_token": row["action_token"],
                 "text": REPLY_TEXT,
             }
-            original = workbench_launch.launch_plan
-            workbench_launch.launch_plan = _capture  # type: ignore[assignment]
+            original = plan_launch.launch_plan
+            plan_launch.launch_plan = _capture  # type: ignore[assignment]
             try:
                 first = session.run_resume(params)
                 second = session.run_resume(params)
             finally:
-                workbench_launch.launch_plan = original  # type: ignore[assignment]
+                plan_launch.launch_plan = original  # type: ignore[assignment]
 
             self.assertEqual(1, len(spawns))
             self.assertEqual(first, second)
@@ -207,18 +207,16 @@ class BridgeResumeTests(unittest.TestCase):
     ) -> dict[str, Any]:
         """Resume a paused plan without spawning anything."""
         row = corpus.row_for(plan_dir)
-        original = workbench_launch.launch_plan
-        workbench_launch.launch_plan = lambda target, **kwargs: (
-            workbench_launch.LaunchResult(  # type: ignore[assignment]
-                pid=1,
-                argv=(),
-                plan_dir=Path(target),
-                profile_payload={},
-                reply_provided=True,
-                reply_length=1,
-                reply_origin="stdin",
-                state_dir=None,
-            )
+        original = plan_launch.launch_plan
+        plan_launch.launch_plan = lambda target, **kwargs: plan_launch.LaunchResult(  # type: ignore[assignment]
+            pid=1,
+            argv=(),
+            plan_dir=Path(target),
+            profile_payload={},
+            reply_provided=True,
+            reply_length=1,
+            reply_origin="stdin",
+            state_dir=None,
         )
         try:
             return session.run_resume(
@@ -230,7 +228,7 @@ class BridgeResumeTests(unittest.TestCase):
                 }
             )
         finally:
-            workbench_launch.launch_plan = original  # type: ignore[assignment]
+            plan_launch.launch_plan = original  # type: ignore[assignment]
 
     def test_a_lifted_pause_alone_does_not_settle_the_resume(self) -> None:
         """The flipped pin.
@@ -238,7 +236,7 @@ class BridgeResumeTests(unittest.TestCase):
         This test previously asserted the opposite: that a plan no longer being
         paused settled the resume as ``consumed``. That is a fact about the
         plan, not about the operator's reply -- *any* run starting on the plan
-        lifts the pause, including one an operator launched from the Workbench a
+        lifts the pause, including one an operator launched from the CLI a
         second earlier -- so the old rule credited this reply with whatever
         happened next. An unwitnessed resume now stays ``accepted`` and reaches
         a terminal status through the witness below or through the TTL, which is

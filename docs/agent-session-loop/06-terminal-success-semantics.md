@@ -132,7 +132,7 @@ so the terminal publication names that issue ID in the run summary rather than
 recording the same mutation a second time. It counts as new when this run opened
 it and as recurring when an earlier run did, which is the rule an allocated
 finding already follows, and it makes the run's most severe issue copyable from
-`asl run`, `asl status`, the Workbench, and the Autopilot instead of only from
+`asl run`, `asl status`, `asl plans`, and the Autopilot instead of only from
 the inbox. A named ID must be one the ledger actually allocated: publication
 resolves it through the merge chain under the lock and refuses the whole append
 when it owns no issue, so a summary never claims an issue the inbox cannot
@@ -292,7 +292,7 @@ inside a union or a generic argument, so `dict | None` and `list[dict]` are
 rejected while `list[dict[str, object]]` is not — no `type: ignore`, and no
 import of the runner. **Checked** gets the same three codes and nothing else — it is where a
 module lands when it is clean under mypy but cannot meet the extraction rules,
-starting with `compact_state` and `workbench`, which drive the runner and so
+starting with `compact_state` and `control_service`, which drive the runner and so
 could never satisfy the one-way dependency Boundary enforces. `runner` itself
 is on Boundary: the rule bans importing the runner, not being it. An overrides
 table cannot name itself (mypy rejects an extra key), so the ratchet resolves

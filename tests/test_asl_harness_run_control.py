@@ -172,7 +172,7 @@ class RunControlTests(FakeHarnessIntegrationBase):
             plan_dir = Path(kwargs["plan_dir"])
             complete_next_pending(plan_dir)
             if len(calls) == 1:
-                # Workbench-style external producer queues a stop request
+                # An external producer (such as `asl control`) queues a stop request
                 # while session 1 is in flight.
                 control_queue.append_command(
                     plan_dir_box[0],

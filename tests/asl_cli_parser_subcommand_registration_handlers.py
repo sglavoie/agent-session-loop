@@ -12,6 +12,7 @@ from .asl_cli_parser_subcommand_registration_support import (
     control_cli,
     control_queue,
     metrics,
+    plans_cli,
     prepare_expand_ingest,
     prepare_models,
     redirect_ack,
@@ -24,8 +25,6 @@ from .asl_cli_parser_subcommand_registration_support import (
     sys,
     turn_execution_constants,
     verification_contract_check,
-    workbench_cli,
-    workbench_server,
 )
 
 
@@ -121,8 +120,8 @@ class ParserSubcommandRegistrationTests(ParserSubcommandRegistrationTestsBase):
         self.assertTrue(args.never_run)
         self.assertEqual("reviewed", args.readiness)
         self.assertTrue(args.json)
-        self.assertEqual("workbench_cli:plans_from_args", args.handler_ref)
-        self.assertIs(cli.resolve_handler(args), workbench_cli.plans_from_args)
+        self.assertEqual("plans_cli:plans_from_args", args.handler_ref)
+        self.assertIs(cli.resolve_handler(args), plans_cli.plans_from_args)
 
     def test_expand_ingest_subcommand_registers_handler(self) -> None:
         parser = cli.build_parser()
@@ -153,8 +152,6 @@ class ParserSubcommandRegistrationTests(ParserSubcommandRegistrationTestsBase):
             "heavy = [\n"
             "    name\n"
             "    for name in (\n"
-            "        'workbench_server',\n"
-            "        'workbench',\n"
             "        'runner',\n"
             "        'review',\n"
             "        'metrics',\n"
@@ -176,14 +173,8 @@ class ParserSubcommandRegistrationTests(ParserSubcommandRegistrationTestsBase):
 
     def test_cli_build_time_default_constants_match_source_modules(self) -> None:
         # cli.py mirrors these defaults locally so building the parser does not
-        # import the heavy `workbench_server`/`metrics` modules. Keep the copies
+        # import the heavy `metrics` module. Keep the copies
         # honest against their authoritative definitions.
-        self.assertEqual(
-            workbench_server.DEFAULT_HOST, cli_defaults._WORKBENCH_DEFAULT_HOST
-        )
-        self.assertEqual(
-            workbench_server.DEFAULT_PORT, cli_defaults._WORKBENCH_DEFAULT_PORT
-        )
         self.assertEqual(
             metrics.DEFAULT_SINCE_DAYS, cli_defaults._METRICS_DEFAULT_SINCE_DAYS
         )

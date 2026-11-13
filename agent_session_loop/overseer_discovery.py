@@ -10,14 +10,15 @@ records and review evidence all sit on the far side of that boundary and are
 never opened here.
 
 This is deliberately not built on the read-only stdio bridge.
-:func:`agent_session_loop.bridge_projection.build_runs_snapshot` projects the Workbench
-queue: it builds a full ``workbench_summary.build_workbench_summary`` per plan -- which
-reads turn records, last-message files and review artifacts -- and it bounds the
-result at ``bridge_protocol.MAX_ROWS`` because a snapshot is a frame on a wire that a
-human is about to look at. A fleet inventory is neither of those things: it has
-to see *every* run in the corpus, and it has to see far less of each one. So it
-walks :func:`agent_session_loop.state.iter_plan_state_dirs` itself and opens
-exactly two files per run -- ``state.json`` and ``lock.json`` -- neither of them
+:func:`agent_session_loop.bridge_projection.build_runs_snapshot` projects the
+intervention queue: it builds a full ``plan_summary.build_plan_summary`` per
+plan -- which reads turn records, last-message files and review artifacts -- and
+it bounds the result at ``bridge_protocol.MAX_ROWS`` because a snapshot is a
+frame on a wire that a human is about to look at. A fleet inventory is neither
+of those things: it has to see *every* run in the corpus, and it has to see far
+less of each one. So it walks
+:func:`agent_session_loop.state.iter_plan_state_dirs` itself and opens exactly
+two files per run -- ``state.json`` and ``lock.json`` -- neither of them
 through a reader that reclaims, rewrites or deletes anything.
 
 ## The metadata the run lifecycle had to start publishing

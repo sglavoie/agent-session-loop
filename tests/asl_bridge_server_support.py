@@ -24,7 +24,7 @@ from agent_session_loop import (
 )
 
 from .support import (
-    _make_workbench_plan,
+    _make_summary_plan,
     _write_lock_file,
     _write_state_payload,
 )
@@ -66,7 +66,7 @@ class _Corpus:
 
     def waiting_plan(self, name: str = "plan-waiting") -> tuple[Path, str]:
         """A live run holding an open mailbox question, the reply-ready shape."""
-        plan_dir = _make_workbench_plan(self.plans_root, name)
+        plan_dir = _make_summary_plan(self.plans_root, name)
         _write_lock_file(
             plan_dir,
             self.state_root,
@@ -124,7 +124,7 @@ class _Corpus:
 
     def running_plan(self, name: str = "plan-running") -> Path:
         """A live run with no open question: control commands only."""
-        plan_dir = _make_workbench_plan(self.plans_root, name)
+        plan_dir = _make_summary_plan(self.plans_root, name)
         _write_lock_file(
             plan_dir,
             self.state_root,
@@ -168,7 +168,7 @@ class _Corpus:
 
     def paused_plan(self, name: str = "plan-paused") -> Path:
         """A paused run whose question is the harness's own last message."""
-        plan_dir = _make_workbench_plan(self.plans_root, name)
+        plan_dir = _make_summary_plan(self.plans_root, name)
         artifact_dir = state.plan_state_dir(plan_dir, self.state_root) / "runs"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         last_message = artifact_dir / "last-message.txt"
@@ -338,30 +338,3 @@ def _handshake(session: bridge_session.BridgeSession) -> dict[str, Any]:
     assert response is not None and response["ok"], response
     assert response["result"]["mutations_enabled"], response
     return response["result"]
-
-
-class _RecordingServer:
-    """A stand-in for the Workbench HTTP server that never binds a socket."""
-
-    instances: list[_RecordingServer] = []
-
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
-        self.token = "test-token"
-        self.bound_host = "127.0.0.1"
-        self.bound_port = 54321
-        self.served = 0
-        self.poll_intervals: list[float] = []
-        self.shutdowns = 0
-        self.closes = 0
-        _RecordingServer.instances.append(self)
-
-    def serve_forever(self, poll_interval: float = 0.5) -> None:
-        self.served += 1
-        self.poll_intervals.append(poll_interval)
-
-    def shutdown(self) -> None:
-        self.shutdowns += 1
-
-    def server_close(self) -> None:
-        self.closes += 1

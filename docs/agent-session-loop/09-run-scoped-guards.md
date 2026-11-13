@@ -115,8 +115,8 @@ asl control guard list PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 Both flags are repeatable and may be combined in one `add`; each rule becomes
 its own guard with its own ID, so they are removed independently. An `add`
 carrying neither is refused with `empty-guard-rule`. `asl control guard` is the
-**only** supported mutation surface for guards: the Workbench and the bridge
-expose no guard-mutation endpoint, deliberately, because a guard is an operator
+**only** supported mutation surface for guards: the bridge exposes no
+guard-mutation method, deliberately, because a guard is an operator
 instruction and the CLI is where an operator already proves which run they mean.
 
 #### Choosing a lever

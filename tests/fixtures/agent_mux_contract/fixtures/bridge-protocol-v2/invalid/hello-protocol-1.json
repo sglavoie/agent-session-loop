@@ -11,8 +11,7 @@
       "question.resolve",
       "run.resume",
       "run.stop_after_current",
-      "run.abort",
-      "workbench.ensure"
+      "run.abort"
     ],
     "contract_set_id": "asl-amx-1.0000000000000000",
     "events": [

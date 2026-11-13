@@ -169,7 +169,7 @@ def control_select_harness_from_args(args: argparse.Namespace) -> int:
     harness = args.harness
     # Defense in depth: argparse `choices` and `control_queue.append_command`
     # both reject unknown harnesses, but direct handler callers get the same
-    # stable `invalid-harness` reason the Workbench API returns.
+    # stable `invalid-harness` reason the queue itself refuses with.
     if harness not in harnesses.HARNESS_NAMES:
         cli_common.print_error(
             args,

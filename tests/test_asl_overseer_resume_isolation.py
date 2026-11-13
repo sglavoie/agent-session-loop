@@ -19,10 +19,10 @@ from agent_session_loop import (
     events,
     intervention,
     overseer_resume,
+    plan_launch,
+    plan_pins_models,
     run_entry,
     state,
-    workbench_launch,
-    workbench_registry_models,
 )
 from tests.support import (
     _FakePopen,
@@ -252,7 +252,7 @@ class LaunchIsolationTests(unittest.TestCase):
         Nothing on the route is replaced except the spawn itself, which the
         launcher already exposes as ``popen_factory``: the adapter's default
         ``launch`` runs, and so do ``intervention.resume_recovered_run`` and
-        ``workbench_launch.launch_plan``, which is where the narrowing has to happen.
+        ``plan_launch.launch_plan``, which is where the narrowing has to happen.
         """
         context = self.context()
 
@@ -269,10 +269,10 @@ class LaunchIsolationTests(unittest.TestCase):
 
     def manual_child(self) -> _FakePopen:
         """The child an ordinary operator-driven resume starts, for contrast."""
-        profile = workbench_registry_models.LaunchProfile(**self.context().profile)
+        profile = plan_pins_models.LaunchProfile(**self.context().profile)
 
         def launch(factory: Any) -> None:
-            workbench_launch.launch_plan(
+            plan_launch.launch_plan(
                 self.plan_dir,
                 profile=profile,
                 reply_text=None,

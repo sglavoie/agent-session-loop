@@ -36,7 +36,6 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
         parser = cli.build_parser()
         groups = {
             "bridge": "asl bridge serve --help",
-            "workbench": "asl workbench serve --help",
             "control": "asl control abort --help",
             "inbox": "asl inbox reply --help",
             "outbox": "asl outbox supervise --help",
@@ -56,38 +55,15 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
                 help_text = group_help.getvalue()
                 # The raw-formatted epilogue is wrapped by hand, so compare
                 # its sentences with the line breaks folded to spaces.
-                flat_help = " ".join(help_text.split())
 
-                if group == "workbench":
-                    # The workbench parent installs the serve flags and runs
-                    # them bare, so its help must not deny the flags it prints.
-                    self.assertIn("--host HOST", help_text)
-                    self.assertNotIn(
-                        "This help lists the `asl workbench` leaf commands only.",
-                        help_text,
-                    )
-                    self.assertIn(
-                        "This help lists the `asl workbench` leaf commands plus "
-                        "the flags the bare `asl workbench` form accepts.",
-                        flat_help,
-                    )
-                    self.assertIn(
-                        "Bare `asl workbench` runs `asl workbench serve` with "
-                        "those flags; every other leaf has its own, so read "
-                        f"`{leaf_example}` or that leaf's help.",
-                        flat_help,
-                    )
-                else:
-                    self.assertNotIn("--host HOST", help_text)
-                    self.assertIn(
-                        f"This help lists the `asl {group}` leaf commands only.",
-                        help_text,
-                    )
-                    self.assertIn(
-                        "Flags belong to a leaf, so read "
-                        f"`{leaf_example}` for its flags.",
-                        help_text,
-                    )
+                self.assertIn(
+                    f"This help lists the `asl {group}` leaf commands only.",
+                    help_text,
+                )
+                self.assertIn(
+                    f"Flags belong to a leaf, so read `{leaf_example}` for its flags.",
+                    help_text,
+                )
                 # The raw formatter prints the description and epilogue as
                 # written (flush left), so they must be wrapped in the source;
                 # argparse wraps the indented rows to the terminal itself.
@@ -102,10 +78,6 @@ class ParserReviewGuardAndResumeOverlayTests(unittest.TestCase):
                     "Run `asl supervisor-guide` for the whole supervision workflow."
                     in help_text,
                 )
-
-        bare = parser.parse_args(["workbench", "--host", "10.0.0.2"])
-        self.assertIsNone(bare.workbench_command)
-        self.assertEqual("10.0.0.2", bare.host)
 
     def test_building_the_parser_does_not_import_the_supervisor_guide(self) -> None:
         # The guide is registered through `handler_ref`, so neither importing

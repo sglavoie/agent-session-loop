@@ -24,7 +24,7 @@ from .bridge_protocol import (
     encode_frame,
 )
 from .bridge_session import BridgeSession
-from .bridge_workers import ProjectionWorker, WorkbenchLifecycle
+from .bridge_workers import ProjectionWorker
 
 
 class _FrameTooLarge(Exception):
@@ -169,11 +169,6 @@ def serve_stdio(
             include_default_dirs=include_default_dirs,
         )
 
-    lifecycle = WorkbenchLifecycle(
-        state_dir=state_dir,
-        plan_roots=plan_roots,
-        include_default_dirs=include_default_dirs,
-    )
     worker = ProjectionWorker(build, interval=poll_interval, clock=clock)
     session = BridgeSession(
         # The session reads the published projection instead of walking the
@@ -181,7 +176,6 @@ def serve_stdio(
         # waits on a build.
         snapshot_builder=worker.latest,
         state_dir=state_dir,
-        workbench_lifecycle=lifecycle,
         clock=clock,
         poll_interval=poll_interval,
         projection_cadence=worker.cadence,
@@ -262,10 +256,9 @@ def serve_stdio(
     try:
         return loop()
     finally:
-        # Both background threads belong to this process, so they die with it
-        # rather than outliving the client they were started for.
+        # The projection worker belongs to this process, so it dies with it
+        # rather than outliving the client it was started for.
         worker.stop()
-        lifecycle.stop()
 
 
 def bridge_serve_from_args(args: Any) -> int:

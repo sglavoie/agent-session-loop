@@ -9,13 +9,13 @@ from agent_session_loop import (
     events,
     plans_session_ids,
     plans_snapshot,
+    recovery_card_build,
     review_continuation,
     review_cycle,
     review_repair,
     review_session_body,
     run_persistence,
     session_verification,
-    workbench_recovery_build,
 )
 from tests.review_cycle_support import RepairCycleFixtures
 from tests.support import (
@@ -469,7 +469,7 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         self.assertFalse(projected.eligible)
         self.assertEqual("all-clear", projected.source_disposition)
         self.assertEqual("all-clear", projected.blocker)
-        recovery = workbench_recovery_build.build_workbench_recovery(
+        recovery = recovery_card_build.build_recovery_card(
             _discovered(self.plan_dir), state_dir=self.state_dir
         )
         self.assertEqual("none", recovery.kind)

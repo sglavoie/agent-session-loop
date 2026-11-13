@@ -159,7 +159,7 @@ class ExternalRecoveryTestCase(unittest.TestCase):
             "--accept",
             preview["evidence_digest"],
             "--reason",
-            "Independent Pi work authorized",
+            "Independent work authorized",
             "--checkpoint-retained",
         )
 

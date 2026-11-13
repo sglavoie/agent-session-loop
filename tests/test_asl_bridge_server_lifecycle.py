@@ -1,4 +1,4 @@
-"""Bridge projection failure backoff, Workbench lifecycle, dispatch, and diagnostics.
+"""Bridge projection failure backoff, dispatch, and diagnostics.
 
 Split from tests/test_asl_bridge_server.py."""
 
@@ -7,7 +7,7 @@ import unittest
 from . import (
     asl_bridge_server_lifecycle_backoff,
     asl_bridge_server_lifecycle_diagnostics,
-    asl_bridge_server_lifecycle_workbench,
+    asl_bridge_server_lifecycle_dispatch,
 )
 
 ASL_TEST_LANE = "integration"
@@ -25,13 +25,7 @@ class BridgePipelinedFrameTests(
     """Preserve the established test IDs."""
 
 
-class BridgeWorkbenchLifecycleTests(
-    asl_bridge_server_lifecycle_workbench.BridgeWorkbenchLifecycleTests
-):
-    """Preserve the established test IDs."""
-
-
-class BridgeDispatchTests(asl_bridge_server_lifecycle_workbench.BridgeDispatchTests):
+class BridgeDispatchTests(asl_bridge_server_lifecycle_dispatch.BridgeDispatchTests):
     """Preserve the established test IDs."""
 
 

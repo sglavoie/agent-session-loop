@@ -73,11 +73,6 @@ asl overseer inspect PLAN_DIR [--kind KIND] [--summary TEXT] [--incident-id ID] 
 asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [--incident-id ID] [--raises TOPIC ...] [--list-statements] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--raises TOPIC ...] [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl overseer reconcile PLAN_DIR [--timeout SECONDS] [--state-dir DIR] [--json]
-asl workbench serve [--host HOST] [--port PORT] [--state-dir DIR] [--plan-root DIR] [--open] [--json]
-asl workbench connect --target-id ID --origin URL --token-file FILE [--connector-id ID] [--state-dir DIR] [--plan-root DIR] [--heartbeat-interval SECONDS] [--observation-interval SECONDS] [--allow-remote-actions] [--json]
-asl workbench pin PLAN_DIR [--cwd ROOT] [--label LABEL] [--json]
-asl workbench unpin PLAN_DIR [--json]
-asl workbench registry [--json]
 ```
 
 ### Flag conventions

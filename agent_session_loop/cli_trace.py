@@ -36,13 +36,13 @@ DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
 ORIGIN_ENV_VAR = "ASL_INVOCATION_ORIGIN"
 ORIGIN_DIRECT = "direct"
 ORIGIN_AUTOPILOT = "autopilot"
-ORIGIN_WORKBENCH = "workbench"
+ORIGIN_PLAN_LAUNCH = "plan-launch"
 ORIGIN_INSTALL_VERIFY = "install-verify"
 ORIGIN_OTHER = "other"
 ORIGIN_NAMES: tuple[str, ...] = (
     ORIGIN_DIRECT,
     ORIGIN_AUTOPILOT,
-    ORIGIN_WORKBENCH,
+    ORIGIN_PLAN_LAUNCH,
     ORIGIN_INSTALL_VERIFY,
 )
 

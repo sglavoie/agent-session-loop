@@ -11,9 +11,9 @@ from agent_session_loop import (
     agent_mux_projection,
     compact_state,
     events,
+    recovery_card_state,
     run_persistence,
     state_payloads,
-    workbench_recovery_state,
 )
 
 
@@ -187,9 +187,9 @@ class PausedWorkCommitProjectionTests(unittest.TestCase):
         self.assertEqual(record["payload"], compact["payload"])
 
     def test_the_recovery_centers_pause_details_reader_names_no_key(self) -> None:
-        # `/api/recovery` and the paused-Q&A projection both reach the pause
+        # Recovery cards and the paused-Q&A projection both reach the pause
         # details through this one reader, which copies the block wholesale.
-        details = workbench_recovery_state._pause_details(
+        details = recovery_card_state._pause_details(
             {"pause_details": {"paused_work_commit": self.RECORD}}
         )
         self.assertEqual(self.RECORD, details["paused_work_commit"])

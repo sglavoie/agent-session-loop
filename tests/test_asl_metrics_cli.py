@@ -181,7 +181,7 @@ class CliInvocationsCliTests(unittest.TestCase):
             invocation_id="seeded",
             timestamp=_iso(now, hours_ago=1),
             command_path=["run"],
-            origin=cli_trace.ORIGIN_WORKBENCH,
+            origin=cli_trace.ORIGIN_PLAN_LAUNCH,
         )
         end = dict(start)
         end.update(
@@ -227,7 +227,7 @@ class CliInvocationsCliTests(unittest.TestCase):
         self.assertEqual(payload["state_root"], invocations["trace_root"])
         self.assertEqual(cli_trace.RETENTION_DAYS, invocations["retention_days"])
         self.assertEqual(1, invocations["nonzero_exits"])
-        self.assertEqual({cli_trace.ORIGIN_WORKBENCH: 1}, invocations["by_origin"])
+        self.assertEqual({cli_trace.ORIGIN_PLAN_LAUNCH: 1}, invocations["by_origin"])
         self.assertEqual(
             ["seeded"],
             [entry["invocation_id"] for entry in invocations["recent_failures"]],
@@ -245,7 +245,7 @@ class CliInvocationsCliTests(unittest.TestCase):
         self.assertIn(f"retention {cli_trace.RETENTION_DAYS} day(s)", stdout)
         self.assertIn("unmatched starts 0", stdout)
         self.assertIn("nonzero exits 1", stdout)
-        self.assertIn("by origin: workbench 1", stdout)
+        self.assertIn("by origin: plan-launch 1", stdout)
         self.assertIn("recent failures (1):", stdout)
         # Existing sections stay put: the block is additive, not a replacement.
         self.assertIn("First-pass completion", stdout)

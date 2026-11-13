@@ -6,10 +6,10 @@ from agent_session_loop import (
     events,
     plans_payloads,
     plans_snapshot,
+    recovery_card_build,
     review_continuation,
     review_repair,
     review_transitions,
-    workbench_recovery_build,
 )
 from tests.review_cycle_support import RepairCycleFixtures
 from tests.support import (
@@ -142,7 +142,7 @@ class ReviewCycleLineageTests(RepairCycleFixtures, unittest.TestCase):
         self.assertEqual("repair-sessions-missing", payload["review_resume"]["blocker"])
         self.assertIsNone(payload["review_fix_disposition"])
 
-        recovery = workbench_recovery_build.build_workbench_recovery(
+        recovery = recovery_card_build.build_recovery_card(
             _discovered(self.plan_dir), state_dir=self.state_dir
         )
         self.assertEqual("review-continuation", recovery.kind)

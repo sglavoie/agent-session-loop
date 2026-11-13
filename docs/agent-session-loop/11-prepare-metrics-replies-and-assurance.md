@@ -214,7 +214,7 @@ exceptions, and unmatched starts, plus counts by command, help depth, exit code,
 harness, and origin, duration median/p95/max, and a bounded
 `recent_failures` list of the 10 most recent failing, usage-error, interrupted,
 or exception invocations. The `origin` counts are what separate a supervisor's
-own `direct` calls from `autopilot`, `workbench`, and `install-verify`
+own `direct` calls from `autopilot`, `plan-launch`, and `install-verify`
 automation. `trace_root` and `retention_days` name where the records live and
 how long they survive, so a zeroed section is distinguishable from a missing
 one. Recent failures carry only the trace's own closed field set —

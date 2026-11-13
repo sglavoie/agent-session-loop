@@ -1,118 +1,19 @@
-"""Background machinery behind the bridge: the Workbench lifecycle and the
-projection worker that keeps snapshot builds off the request path.
+"""Background machinery behind the bridge: the projection worker that keeps
+snapshot builds off the request path.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-import urllib.parse
-from collections.abc import Callable, Sequence
-from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from .bridge_protocol import (
-    ERROR_WORKBENCH_UNAVAILABLE,
     POLL_INTERVAL_SECONDS,
     PROJECTION_RETRY_INTERVAL_SECONDS,
-    WORKBENCH_POLL_INTERVAL_SECONDS,
     WORKER_JOIN_TIMEOUT_SECONDS,
-    BridgeError,
 )
-
-
-class WorkbenchLifecycle:
-    """One lazily started, bridge-owned Workbench server.
-
-    Started on demand because most bridge sessions never need a browser, bound
-    to ``127.0.0.1`` on an ephemeral port so it is unreachable off the host and
-    cannot collide with an operator's own ``asl workbench serve``, and reused
-    across requests so repeated links do not accumulate listeners.
-    """
-
-    host = "127.0.0.1"
-
-    def __init__(
-        self,
-        *,
-        state_dir: str | Path | None = None,
-        plan_roots: Sequence[str | Path] = (),
-        include_default_dirs: bool = True,
-        server_factory: Callable[..., Any] | None = None,
-    ) -> None:
-        self.state_dir = state_dir
-        self.plan_roots = tuple(plan_roots)
-        self.include_default_dirs = include_default_dirs
-        self._server_factory = server_factory
-        self._lock = threading.Lock()
-        self._server: Any | None = None
-        self._thread: threading.Thread | None = None
-
-    def _factory(self) -> Callable[..., Any]:
-        if self._server_factory is not None:
-            return self._server_factory
-        # Imported here so a bridge that is never asked for a browser never
-        # pays for the HTTP stack.
-        from . import workbench_server
-
-        return workbench_server.create_server
-
-    def ensure(self) -> Any:
-        """Return the running server, starting exactly one on first request."""
-        with self._lock:
-            if self._server is not None:
-                return self._server
-            try:
-                server = self._factory()(
-                    host=self.host,
-                    port=0,
-                    state_dir=self.state_dir,
-                    plan_roots=self.plan_roots,
-                    include_default_dirs=self.include_default_dirs,
-                )
-            except (OSError, ValueError) as error:
-                raise BridgeError(
-                    ERROR_WORKBENCH_UNAVAILABLE,
-                    f"workbench server could not start: {error}",
-                    retryable=True,
-                ) from error
-            thread = threading.Thread(
-                target=lambda: server.serve_forever(
-                    poll_interval=WORKBENCH_POLL_INTERVAL_SECONDS
-                ),
-                name="asl-bridge-workbench",
-                daemon=True,
-            )
-            thread.start()
-            self._server = server
-            self._thread = thread
-            return server
-
-    def url(self, plan_dir: str, focus: str) -> str:
-        """Return a tokenized deep link into one plan's detail view.
-
-        The token rides in the query string because the fragment is never sent
-        to the server, and the plan selection rides in the fragment because the
-        Workbench front end routes on it.
-        """
-        server = self.ensure()
-        query = urllib.parse.urlencode({"token": server.token})
-        fragment = urllib.parse.urlencode({"dir": plan_dir, "focus": focus})
-        return (
-            f"http://{server.bound_host}:{server.bound_port}/?{query}#plan?{fragment}"
-        )
-
-    def stop(self) -> None:
-        """Shut the server down with the bridge that started it."""
-        with self._lock:
-            server, thread = self._server, self._thread
-            self._server = self._thread = None
-        if server is None:
-            return
-        server.shutdown()
-        server.server_close()
-        if thread is not None:
-            thread.join(timeout=5.0)
 
 
 class ProjectionPending(Exception):

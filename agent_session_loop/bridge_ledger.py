@@ -12,16 +12,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from asl_workbench import actions as action_rules
-from asl_workbench import operations as operation_rules
-
 from . import (
+    action_rules,
     intervention,
     mailbox_models,
+    operation_rules,
+    operation_store,
+    plan_launch,
     redirect_store_vocab,
-    workbench_actions,
-    workbench_launch,
-    workbench_operations,
+    run_actions,
 )
 from .bridge_errors import _bridge_error, _optional_str, _require_str
 from .bridge_projection import row_id
@@ -212,7 +211,7 @@ class OperationLedger(SessionState):
         """
         try:
             return (
-                workbench_operations.events_path_for_plan(plan_dir, self.state_dir)
+                operation_store.events_path_for_plan(plan_dir, self.state_dir)
                 .stat()
                 .st_size
             )
@@ -228,7 +227,7 @@ class OperationLedger(SessionState):
         operation_id: str,
         text: str,
         question_id: str | None = None,
-    ) -> workbench_actions.ActionOutcome:
+    ) -> run_actions.ActionOutcome:
         """Run one mutation through the shared action, in bridge vocabulary.
 
         The bridge's own receipt table is not dropped in favour of the journal:
@@ -239,7 +238,7 @@ class OperationLedger(SessionState):
         second spawn or a second answer.
         """
         try:
-            return workbench_actions.perform(
+            return run_actions.perform(
                 facts.plan_dir,
                 action=action,
                 operation_id=operation_id,
@@ -251,7 +250,7 @@ class OperationLedger(SessionState):
             )
         except intervention.InterventionError as error:
             raise _bridge_error(error) from error
-        except workbench_launch.LaunchError as error:
+        except plan_launch.LaunchError as error:
             raise BridgeError(
                 ERROR_MUTATION_FAILED,
                 f"{action} could not be started: {error.message}",
@@ -261,13 +260,13 @@ class OperationLedger(SessionState):
             # The journal's refusals are finer-grained than the protocol's
             # error codes, which are pinned by the contract set. The reason
             # rides in `details` rather than being minted as a new code a
-            # connector would not recognise.
+            # client would not recognise.
             raise BridgeError(
                 ERROR_MUTATION_FAILED,
                 error.message,
                 details={"reason": error.reason, **error.details},
             ) from error
-        except workbench_actions.ActionRefused as error:
+        except run_actions.ActionRefused as error:
             raise BridgeError(
                 ERROR_MUTATION_FAILED,
                 error.message,
@@ -382,10 +381,8 @@ class OperationLedger(SessionState):
         This used to read "the plan is no longer paused, therefore the reply was
         consumed". That is a fact about the plan and not about the operation:
         any run starting on it lifts the pause -- one an operator launched from
-        the Workbench a second earlier, a retry, a scheduled run -- so the rule
-        credited this reply with whatever happened next. The Companion grew its
-        own resume witness precisely because of that answer, and this is that
-        witness, moved here so both surfaces have it.
+        the CLI a second earlier, a retry, a scheduled run -- so the rule
+        credited this reply with whatever happened next.
 
         What settles it now is run-bound: a run appended ``reply_provided``
         naming ``stdin`` as the origin after this operation took its mark. What
@@ -418,7 +415,7 @@ class OperationLedger(SessionState):
             action_rules.METHOD_FOR_ACTION[action_rules.ACTION_RESUME]
         )
         assert origin is not None  # a resume bears a reply
-        path = workbench_operations.events_path_for_plan(
+        path = operation_store.events_path_for_plan(
             Path(operation.plan_dir), self.state_dir
         )
         try:

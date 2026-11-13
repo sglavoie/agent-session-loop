@@ -131,7 +131,7 @@ def _assurance_payload(payload: dict | None) -> dict | None:
     """Return a bounded, display-only projection of a payload's assurance object.
 
     Built through ``agent_session_loop.assurance_report`` so the supervision
-    result, ``asl run``, ``asl status``, and the Workbench all describe one
+    result, ``asl run``, ``asl status``, and the bridge all describe one
     audit the same way. The projection carries a verdict and the inbox command;
     it carries nothing with which this helper could configure, launch, retry, or
     dispose of an audit, and this helper never writes to the ledger.

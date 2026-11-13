@@ -353,8 +353,7 @@ def render_text(payload: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Leaf help (these groups list leaves only; asl workbench is the "
-            "exception and shows its serve flags on the parent)",
+            "Leaf help (these groups list leaves only)",
         ]
     )
     lines.extend(f"  {command}" for command in payload["leaf_help"])

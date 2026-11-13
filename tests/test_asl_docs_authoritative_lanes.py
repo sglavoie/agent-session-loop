@@ -177,8 +177,6 @@ class AuthoritativeLaneDocsTests(unittest.TestCase):
         self.assertNotIn("cache-dependency-path: .github", check)
         self.assertEqual(2, check.count("path: .cache/run_suite_logs/"))
         self.assertIn('python-version: ["3.14", "3.15"]', check)
-        # The 3.13 floor the portable Workbench promises is exercised in CI.
-        self.assertIn("python3.13 -m unittest -q tests.test_workbench_portable", check)
 
     def test_the_pause_no_reply_clears_says_where_to_look_in_both_places(self) -> None:
         """A stop nobody can answer has to name the evidence that ends it."""

@@ -138,7 +138,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "Run, status, Autopilot, Workbench, and metrics expose assurance "
+        "Run, status, Autopilot, plan summaries, and metrics expose assurance "
         "without driving implementation or changing results.",
         (
             "tests.test_asl_supervisor_audit_run_output_state:"
@@ -147,7 +147,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "TerminalizationCoordinatorTests.test_the_exit_code_survives_the_coordinator_unchanged",
             "tests.test_asl_assurance_lifecycle_terminal_outcomes:"
             "TerminalBranchRoutingTests.test_an_unavailable_audit_changes_nothing_it_graded",
-            "tests.test_asl_workbench_summary_completion:WorkbenchSummaryTests.test_assurance_summary_carries_no_audit_controls",
+            "tests.test_asl_plan_summary_completion:PlanSummaryTests.test_assurance_summary_carries_no_audit_controls",
             "tests.test_asl_assurance_metrics:"
             "CoverageMetricsTests.test_coverage_separates_graded_runs_from_merely_recorded_ones",
             "skills/asl/scripts/test_asl_autopilot_review_verdict.py:"

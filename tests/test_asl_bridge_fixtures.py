@@ -548,17 +548,11 @@ class MutationGateTests(unittest.TestCase):
         readable = set(bridge_session.CAPABILITIES) - set(
             bridge_protocol.MUTATION_METHODS
         )
-        # A capability-granting read is still a read on the wire: it needs a
-        # contract-matched handshake, never a current snapshot.
-        self.assertEqual({"workbench.ensure"}, set(bridge_protocol.CAPABILITY_METHODS))
-        self.assertLessEqual(set(bridge_protocol.CAPABILITY_METHODS), readable)
-
         self.assertEqual(
             {
                 bridge_protocol.METHOD_HANDSHAKE,
                 "runs.snapshot",
                 "question.get",
-                "workbench.ensure",
                 bridge_protocol.METHOD_REDIRECT_STATUS,
                 bridge_protocol.METHOD_RECOVER_CONVERSATION,
             },
@@ -617,13 +611,6 @@ class ReceiptAndLinkTests(unittest.TestCase):
         # same token, which is why the fixture carries the expected fingerprint.
         self.assertTrue(error["retryable"])
         self.assertIn("expected_fingerprint", error["details"])
-
-    def test_workbench_link_is_a_loopback_url_with_a_declared_focus(self) -> None:
-        link = fixture("workbench-link")["document"]["result"]
-
-        self.assertIn(link["focus"], bridge_protocol.WORKBENCH_FOCUS_VALUES)
-        self.assertTrue(link["url"].startswith("http://127.0.0.1:"))
-        self.assertIn("token=", link["url"])
 
     def test_the_runs_changed_event_names_a_declared_event(self) -> None:
         event = fixture("runs-changed-event")["document"]

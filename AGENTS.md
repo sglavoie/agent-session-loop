@@ -1,7 +1,7 @@
 # Repository guide
 
-- Agent Session Loop (`agent_session_loop/`, the `asl` CLI), its portable
-  Workbench (`asl_workbench/`), and the ASL skills (`skills/`). The harness
+- Agent Session Loop (`agent_session_loop/`, the `asl` CLI) and the ASL
+  skills (`skills/`). The harness
   context files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, ...) live outside
   this repository.
 - `just all` (alias of `just install`) runs `install.py`, which links

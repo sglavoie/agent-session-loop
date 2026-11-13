@@ -40,7 +40,7 @@ from agent_session_loop import (
     run_entry_resume,
     run_flags,
     turn_execution_executor,
-    workbench_recovery_models,
+    recovery_card_models,
     workspaces,
 )
 

@@ -21,7 +21,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
         findings = [
             self._finding("F1", "runner"),
             self._finding("F2", "runner", severity="med"),
-            self._finding("F3", "workbench", severity="low"),
+            self._finding("F3", "viewer", severity="low"),
         ]
         self._write_plan(findings)
         before = self._plan_bytes()
@@ -36,7 +36,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
             repair_plan.finding_fingerprints,
         )
         self.assertEqual(
-            ["runner", "workbench"],
+            ["runner", "viewer"],
             [group.repair_group for group in repair_plan.repair_groups],
         )
         self.assertEqual(
@@ -95,9 +95,7 @@ class ReviewRepairChildScopeTests(MaterializationFixtures, unittest.TestCase):
     def test_child_scope_defers_another_groups_known_failure_to_that_group(
         self,
     ) -> None:
-        self._write_plan(
-            [self._finding("F1", "runner"), self._finding("F2", "workbench")]
-        )
+        self._write_plan([self._finding("F1", "runner"), self._finding("F2", "viewer")])
 
         repair_plan = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
 

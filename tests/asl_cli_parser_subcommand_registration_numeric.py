@@ -15,9 +15,6 @@ from .asl_cli_parser_subcommand_registration_support import (
 class NumericFlagValidationTests(NumericFlagValidationTestsBase):
     def test_bad_numeric_values_are_refused_with_the_flag_named(self) -> None:
         cases = (
-            (["workbench", "serve", "--port", "99999"], "--port", "0 to 65535"),
-            (["workbench", "serve", "--port", "-1"], "--port", "0 to 65535"),
-            (["workbench", "--port", "70000"], "--port", "0 to 65535"),
             (
                 ["overseer", "watch", "--watcher-id", "w", "--for-seconds", "nan"],
                 "--for-seconds",
@@ -41,22 +38,6 @@ class NumericFlagValidationTests(NumericFlagValidationTestsBase):
             (
                 ["overseer", "inspect", "/tmp/plan", "--incident-id", "0"],
                 "--incident-id",
-                "positive",
-            ),
-            (
-                [
-                    "workbench",
-                    "connect",
-                    "--target-id",
-                    "t",
-                    "--origin",
-                    "https://example.invalid",
-                    "--token-file",
-                    "/tmp/token",
-                    "--heartbeat-interval",
-                    "nan",
-                ],
-                "--heartbeat-interval",
                 "positive",
             ),
         )
@@ -130,12 +111,6 @@ class NumericFlagValidationTests(NumericFlagValidationTestsBase):
 
     def test_in_range_values_still_parse(self) -> None:
         parser = cli.build_parser()
-        self.assertEqual(
-            0, parser.parse_args(["workbench", "serve", "--port", "0"]).port
-        )
-        self.assertEqual(
-            65535, parser.parse_args(["workbench", "serve", "--port", "65535"]).port
-        )
         args = parser.parse_args(
             ["maintenance", "install", "--hour", "23", "--minute", "0"]
         )

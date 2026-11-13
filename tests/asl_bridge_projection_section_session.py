@@ -311,7 +311,7 @@ class FrameBoundTests(unittest.TestCase):
     def test_per_field_bounds_keep_corrupt_state_inside_the_frame(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
-            plan_dir = _make_workbench_plan(corpus.plans_root)
+            plan_dir = _make_summary_plan(corpus.plans_root)
             corpus.write_state(
                 plan_dir,
                 {
@@ -378,7 +378,7 @@ class FrameBoundTests(unittest.TestCase):
             "plan_dir": "/plans/recent",
             "last_activity_at": "2026-09-17T16:00:00+00:00",
         }
-        discovered = workbench_registry_models.DiscoveryResult(
+        discovered = plan_pins_models.DiscoveryResult(
             plans=tuple(range(len(backlog) + 3))
         )
         summaries = [
@@ -386,11 +386,9 @@ class FrameBoundTests(unittest.TestCase):
             for row in [*backlog, *live, recent]
         ]
         with (
+            mock.patch.object(plan_scan, "discover_plans", return_value=discovered),
             mock.patch.object(
-                workbench_discovery, "discover_plans", return_value=discovered
-            ),
-            mock.patch.object(
-                workbench_summary, "build_workbench_summary", side_effect=summaries
+                plan_summary, "build_plan_summary", side_effect=summaries
             ),
             mock.patch.object(
                 bridge_projection, "project_row", side_effect=[*backlog, *live, recent]

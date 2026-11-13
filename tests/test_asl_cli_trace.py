@@ -70,7 +70,7 @@ class CliTraceTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         # The origin marker is inherited, so a suite launched by autopilot or
-        # the workbench would otherwise see its launcher's origin instead of
+        # by a plan launch would otherwise see its launcher's origin instead of
         # `direct`. Drop it for the same reason the trace root is redirected:
         # these cases assert what the CLI records, not who ran the tests.
         # `patch.dict` restores the whole mapping, so the removal is undone too.
@@ -340,14 +340,14 @@ class HarnessAndOriginTests(CliTraceTestCase):
         invocation = cli_trace.start(
             parser,
             ["tail", "/tmp/plan"],
-            env={"CLAUDECODE": "1", cli_trace.ORIGIN_ENV_VAR: "workbench"},
+            env={"CLAUDECODE": "1", cli_trace.ORIGIN_ENV_VAR: "plan-launch"},
         )
         invocation.finish(exit_code=0, outcome=cli_trace.OUTCOME_OK)
 
         start, _ = self.assert_pair(self.records())
 
         self.assertEqual("claude", start["harness"])
-        self.assertEqual("workbench", start["origin"])
+        self.assertEqual("plan-launch", start["origin"])
 
     def test_ambiguous_harness_detection_records_null(self) -> None:
         parser = cli.build_parser(prog="asl")
@@ -358,11 +358,16 @@ class HarnessAndOriginTests(CliTraceTestCase):
 
         self.assertIsNone(self.records()[0]["harness"])
 
+    def test_the_suite_disables_tracing_under_the_product_variable(self) -> None:
+        import tests
+
+        self.assertEqual(cli_trace.TRACE_ENV_VAR, tests.TRACE_ENV_VAR)
+
     def test_every_named_origin_constant_is_allowlisted(self) -> None:
         for name in (
             cli_trace.ORIGIN_DIRECT,
             cli_trace.ORIGIN_AUTOPILOT,
-            cli_trace.ORIGIN_WORKBENCH,
+            cli_trace.ORIGIN_PLAN_LAUNCH,
             cli_trace.ORIGIN_INSTALL_VERIFY,
         ):
             self.assertIn(name, cli_trace.ORIGIN_NAMES)
@@ -370,10 +375,10 @@ class HarnessAndOriginTests(CliTraceTestCase):
 
     def test_child_env_marks_the_origin_and_preserves_every_other_entry(self) -> None:
         child = cli_trace.child_env(
-            {"PATH": "/bin", "HOME": "/home/x"}, cli_trace.ORIGIN_WORKBENCH
+            {"PATH": "/bin", "HOME": "/home/x"}, cli_trace.ORIGIN_PLAN_LAUNCH
         )
 
-        self.assertEqual("workbench", child[cli_trace.ORIGIN_ENV_VAR])
+        self.assertEqual("plan-launch", child[cli_trace.ORIGIN_ENV_VAR])
         self.assertEqual("/bin", child["PATH"])
         self.assertEqual("/home/x", child["HOME"])
 

@@ -9,7 +9,7 @@ only here is the boundary those three meet at:
   token, and a client that fails either gate must leave the journal untouched.
   A refusal that still wrote is worse than no feature: the operator is told the
   correction did not land and the worker gets it anyway.
-- The two companion methods are reads, so they answer a client whose contract
+- The two sibling methods are reads, so they answer a client whose contract
   set no longer matches. The client most in need of "where did my correction
   get to" is the one that just lost its own record of it.
 - Every redirect frame is body-free. The bridge never calls the one function

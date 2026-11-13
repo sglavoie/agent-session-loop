@@ -87,7 +87,7 @@ line prints and what the supervisor audit bundle carries in `commit_failures`.
 
 The record is free-form as far as the state projections are concerned.
 `asl status`'s runner-state projection carries no `pause_details` key at all, so
-there is no status schema for it to join, and the Recovery Center's pause-detail
+there is no status schema for it to join, and the recovery card's pause-detail
 copy names no keys, so it surfaces there unchanged. Turn compaction rewrites
 only `before`, `after`, and `verification`, so the record survives it intact.
 `metrics --json`'s `verification_repair` object counts the settlements it finds:
@@ -134,7 +134,7 @@ existing plan directory reports `reason: ambiguous-plan` with
 `details.state_root` and a sorted `details.candidates` list of canonical paths.
 The missing-directory case is the same on every plan-scoped command: `run`,
 `doctor`, `questions`, `review-verdict`, `contract-check`, `baseline`,
-`register-repositories`, `compact-state`, `gc`, `unlock`, `workbench pin`,
+`register-repositories`, `compact-state`, `gc`, `unlock`,
 `acknowledge-external-changes` and `accept-ref-updates` all report a `PLAN_DIR`
 that does not exist as `reason: plan-not-found` with `paused: false` (a `run`
 that never started is not a pause), while each keeps its own reason

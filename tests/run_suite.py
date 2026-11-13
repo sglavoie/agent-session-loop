@@ -11,7 +11,7 @@ is a fast-lane shard unless it says otherwise with a module-level literal,
 read here from its source without importing it:
 
 ``ASL_TEST_LANE = "integration"``
-    The module runs fake-harness end-to-end flows, workbench servers, or other
+    The module runs fake-harness end-to-end flows, bridge servers, or other
     subprocess-heavy orchestration, so only ``--all`` runs it.
 ``ASL_TEST_PORTABLE = True``
     The module spawns no external process at all -- no ``git``, no shell

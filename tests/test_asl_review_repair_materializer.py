@@ -33,7 +33,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
         first = review_repair_planning.plan_review_repair_sessions(self.plan_dir)
         revised = self._finding(
             "F1",
-            "workbench",
+            "viewer",
             done_criteria=["F1 is fixed through a revised criterion."],
             verification_checks=[
                 {
@@ -56,7 +56,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
         self.assertEqual(first.review_output_sha256, second.review_output_sha256)
         self.assertNotEqual(first.review_artifact_sha256, second.review_artifact_sha256)
         self.assertEqual("runner", first.repair_groups[0].repair_group)
-        self.assertEqual("workbench", second.repair_groups[0].repair_group)
+        self.assertEqual("viewer", second.repair_groups[0].repair_group)
 
     def test_materializer_stages_prevalidated_planner_output(self) -> None:
         self._write_plan([self._finding("F1", "runner")])
@@ -86,7 +86,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
             [
                 self._finding("F1", "runner"),
                 self._finding("F2", "runner", severity="med"),
-                self._finding("F3", "workbench", severity="low"),
+                self._finding("F3", "viewer", severity="low"),
             ]
         )
         result = self._materialize()
@@ -99,7 +99,7 @@ class ReviewRepairMaterializerTests(MaterializationFixtures, unittest.TestCase):
             [child.session_id.value for child in result.children],
         )
         self.assertEqual(
-            ["runner", "workbench"],
+            ["runner", "viewer"],
             [child.repair_group for child in result.children],
         )
         self.assertEqual(("F1", "F2"), result.children[0].finding_ids)

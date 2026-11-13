@@ -47,7 +47,7 @@ class RunsProjectionTests(unittest.TestCase):
             },
             set(bridge_protocol.ACTIVE_PRIMARY_STATES),
         )
-        excluded = set(workbench_summary_model.PRIMARY_STATES) - set(
+        excluded = set(plan_summary_model.PRIMARY_STATES) - set(
             bridge_protocol.ACTIVE_PRIMARY_STATES
         )
         self.assertEqual({"ready", "recent", "complete"}, excluded)
@@ -156,12 +156,12 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertEqual("awaiting-reply", row["phase"])
             self.assertEqual("needs-action", row["urgency_group"])
             self.assertEqual(
-                workbench_summary_model.URGENCY_RANK_BY_STATE["paused-for-reply"],
+                plan_summary_model.URGENCY_RANK_BY_STATE["paused-for-reply"],
                 row["urgency_rank"],
             )
             self.assertEqual("reply", row["recommended_action"])
             self.assertEqual(
-                workbench_summary_model.ACTIVITY_LABEL_BY_STATE["paused-for-reply"],
+                plan_summary_model.ACTIVITY_LABEL_BY_STATE["paused-for-reply"],
                 row["activity_label"],
             )
             self.assertEqual("claude", row["harness"])
@@ -179,7 +179,7 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertEqual(first["rows"], second["rows"])
             self.assertEqual(first["digest"], second["digest"])
 
-    def test_rows_preserve_workbench_urgency_order(self) -> None:
+    def test_rows_preserve_urgency_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             corpus.running_plan()
@@ -377,11 +377,11 @@ class ObservationalReadTests(unittest.TestCase):
     def test_snapshot_does_not_reclaim_a_dead_local_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
-            plan_dir = _make_workbench_plan(corpus.plans_root)
+            plan_dir = _make_summary_plan(corpus.plans_root)
             lock_path = _write_lock_file(
                 plan_dir,
                 corpus.state_root,
-                pid=_WORKBENCH_DEAD_PID,
+                pid=_SUMMARY_DEAD_PID,
                 hostname=socket.gethostname(),
             )
 
@@ -396,22 +396,20 @@ class ObservationalReadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state_root = tmp_path / "state"
-            plan_dir = _make_workbench_plan(tmp_path)
+            plan_dir = _make_summary_plan(tmp_path)
             lock_path = _write_lock_file(
                 plan_dir,
                 state_root,
-                pid=_WORKBENCH_DEAD_PID,
+                pid=_SUMMARY_DEAD_PID,
                 hostname=socket.gethostname(),
             )
 
-            workbench_summary.build_workbench_summary(
+            plan_summary.build_plan_summary(
                 _discovered(plan_dir), state_dir=state_root, reclaim=False
             )
             self.assertTrue(lock_path.exists())
 
-            workbench_summary.build_workbench_summary(
-                _discovered(plan_dir), state_dir=state_root
-            )
+            plan_summary.build_plan_summary(_discovered(plan_dir), state_dir=state_root)
             self.assertFalse(lock_path.exists())
 
 

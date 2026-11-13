@@ -11,13 +11,8 @@ from .support_base import load_section_tests
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 #: The package trees every module of which must be on one of the two override
-#: tables. ``asl_workbench`` joins the walk because it is a package this
-#: repository maintains and ships, so a portable module added tomorrow has to
-#: pick a table rather than inherit the untyped baseline.
-PACKAGE_ROOTS = (
-    REPO_ROOT / "agent_session_loop",
-    REPO_ROOT / "asl_workbench",
-)
+#: tables.
+PACKAGE_ROOTS = (REPO_ROOT / "agent_session_loop",)
 
 #: The repository-wide suppressions as of the session that added this ratchet.
 #: This set is a ceiling: a code may leave it once the tree is clean enough to

@@ -148,7 +148,7 @@ def is_plan_state_dir_name(name: str) -> bool:
     """Whether ``name`` is a per-plan state directory name (a path digest).
 
     Per-plan state lives at ``<state_root>/<path_sha256(plan_dir)>``; anything
-    else under the state root (the Workbench ``archive/``, ledgers, locks) is
+    else under the state root (ledgers, locks, a legacy ``archive/``) is
     a sibling, not a plan, and every state-root scan skips it.
     """
     return _PLAN_STATE_DIR_NAME_RE.fullmatch(name) is not None

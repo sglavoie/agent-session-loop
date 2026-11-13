@@ -17,14 +17,8 @@ time. Both names are wrappers in `bin/.local/bin/`.
 Run split agent session plans one session at a time.
 `asl run` self-heals stale/missing runner-managed `progress.md` and recomputable manifest readiness metadata before pausing, `asl preflight` clears non-derived loop-ready findings, `asl verify` executes a session's completion contract, and `asl sessions` shows running and recent ASL-managed activity across every plan state directory.
 Pass `asl run ... --review-harness codex|claude|copilot` to append a final pure-critique session under a second harness that writes `PLAN_DIR/final-review.md`.
-Review repair materializations use an absolute cross-run `--max-review-fix-cycles` cap: a higher cap can reopen budget-stopped findings, and a corrected structured artifact can retry a prior `malformed-review-repair`; the additive `review_resume` JSON block and Workbench Recovery Center explain the next same-plan action.
+Review repair materializations use an absolute cross-run `--max-review-fix-cycles` cap: a higher cap can reopen budget-stopped findings, and a corrected structured artifact can retry a prior `malformed-review-repair`; the additive `review_resume` JSON block and the plan's recovery card explain the next same-plan action.
 When a session pauses with `reason: blocked` because it needs operator answers, use `asl questions PLAN_DIR` to render the resolver prompt and `asl run PLAN_DIR --resume --reply TEXT` to resume the paused turn with the operator's verbatim reply under its original harness, model, and effort.
-
-### Workbench
-
-`asl workbench [serve]` launches a stdlib-only loopback HTTP control plane (token-protected mutating endpoints, browser UI at the printed `?token=` URL) that surfaces every discoverable plan — including any directories listed under registry `plan_roots` — supports pin/unpin with tri-state nullable launch profiles (blank means "leave the runner default alone"), renders dotted session IDs verbatim from `/api/state.sessions`, enqueues stop-after-current and harness-selection through the runner control queue, streams logs/events/progress, offers cleanup/archive/retention views for old plans with restore and typed-count purge, shows a deterministic Recovery Center with `/api/recovery` diagnostics and copy-only repair commands, and submits paused-Q&A replies without persisting reply text.
-The bare `asl workbench` form defaults to `serve`; companion commands `asl workbench pin PLAN_DIR [--cwd ROOT] [--label LABEL]`, `asl workbench unpin PLAN_DIR`, and `asl workbench registry [--json]` manage the registry from the CLI.
-`asl workbench connect --target-id ID --origin https://HOST --token-file PATH` is the outbound half of the same Workbench: it reads the shared catalog, run, and history services in process — no bridge subprocess — and publishes bounded, path-free heartbeat, snapshot, catalog-page, and history-batch observations to a remote service over HTTPS, single-instance per state directory, with deterministic 1s–60s backoff and a history checkpoint that advances only after every frame of a pass was accepted, so a reconnect repeats rather than duplicates and observation never modifies the corpus it reads.
 
 ### Run guards
 
@@ -32,9 +26,9 @@ Mid-run enforcement, as distinct from advice, is `asl control guard add PLAN_DIR
 A violation rejects the turn, retains every filesystem change, returns the session to pending, and pauses with `guard-protected-path-changed`; it never rolls back, aborts, or restarts anything.
 `asl control guard list` and `asl status` report each guard's per-lane coverage (`command-gate`, `pretool`, `postflight`) as active, degraded, or unsupported with a stable reason, because a harness that cannot enforce a rule should say so rather than imply it did.
 
-### Run control without the Workbench
+### Run control
 
-The Workbench's run controls are also available without it. `asl control stop-after-current PLAN_DIR_OR_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` and `asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` are the programmatic equivalents of the interactive `p` and `1`/`2`/`3` run-control keys, which are disabled for `run --json`, `run --dry-run`, and non-TTY runs; each validates the plan, enqueues onto the durable per-plan control queue, and reports `enqueued`, `command_id`, `run_active`, and a `note` (plus `pending_after_current` for stop-after-current and `harness` for select-harness).
+`asl control stop-after-current PLAN_DIR_OR_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` and `asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]` are the programmatic equivalents of the interactive `p` and `1`/`2`/`3` run-control keys, which are disabled for `run --json`, `run --dry-run`, and non-TTY runs; each validates the plan, enqueues onto the durable per-plan control queue, and reports `enqueued`, `command_id`, `run_active`, and a `note` (plus `pending_after_current` for stop-after-current and `harness` for select-harness).
 The rest of `asl control` — `abort`, `set-model`, `guard`, and the `redirect`, `redirect-status`, `resolve-redirect` and `recover-conversation` leaves for correcting a live turn — is listed with its flags in the [command reference](agent-session-loop/02-commands.md); every receipt wait there takes `--wait` with `--timeout` (also spelled `--wait-timeout`), except that `redirect` always waits for the runner's acceptance up to `--timeout` (default 2 seconds, at most 30) and `redirect-status` waits only with `--wait-acknowledged`.
 An honored stop lets the current session finish and, when any session is still pending, exits the run successfully with `reason: stopped` so the next run resumes from the remainder (a stop requested during the last session still ends `all-complete`, unless `--review-harness` is set: the generated review would start after that session, so the run exits `reason: stopped` with the review pending and re-running the same command performs it).
 
@@ -45,13 +39,13 @@ It stops with a terminal status (`complete`, `max-sessions`, `stopped`, `needs_a
 
 ### Preparation and inspection
 
-`asl prepare PLAN.md --cwd ROOT` runs the whole preparation pipeline (split, validate, expand, baseline, mark loop-ready) in one deterministic command and prints the exact `asl run` command on success, `asl split --check --plan-file PLAN.md` lints a source plan's session headings without writing anything and reports every malformed heading at once (each with a `suggested_line` when the repair is unambiguous) so `session-split` repairs a plan instead of dead-ending on `malformed-plan`, `asl baseline` records completion-contract baseline evidence for the preflight gate, `asl compact-state` reclaims duplicated operational JSON (dry-run by default, `--apply` to rewrite), `asl bridge serve --stdio --protocol 2` exposes the active/actionable run corpus and every operator intervention to an external supervision client over NDJSON on stdio (body-free snapshots plus `runs.changed`, an explicit `question.get`, and token-guarded `question.reply`, `question.resolve`, `run.resume`, `run.stop_after_current`, `run.abort`, and `workbench.ensure` that share one service layer with the CLI and Workbench, answer `accepted` with an operation ID, and report later outcomes as body-free `operation.updated` events), and `asl metrics` reports reliability, windowed review materializations and reopen attempts/results, and storage numbers over the recent state corpus (default activity window: last 7 days).
+`asl prepare PLAN.md --cwd ROOT` runs the whole preparation pipeline (split, validate, expand, baseline, mark loop-ready) in one deterministic command and prints the exact `asl run` command on success, `asl split --check --plan-file PLAN.md` lints a source plan's session headings without writing anything and reports every malformed heading at once (each with a `suggested_line` when the repair is unambiguous) so `session-split` repairs a plan instead of dead-ending on `malformed-plan`, `asl baseline` records completion-contract baseline evidence for the preflight gate, `asl compact-state` reclaims duplicated operational JSON (dry-run by default, `--apply` to rewrite), `asl bridge serve --stdio --protocol 2` exposes the active/actionable run corpus and every operator intervention to an external supervision client over NDJSON on stdio (body-free snapshots plus `runs.changed`, an explicit `question.get`, and token-guarded `question.reply`, `question.resolve`, `run.resume`, `run.stop_after_current`, and `run.abort` that share one service layer with the CLI, answer `accepted` with an operation ID, and report later outcomes as body-free `operation.updated` events), and `asl metrics` reports reliability, windowed review materializations and reopen attempts/results, and storage numbers over the recent state corpus (default activity window: last 7 days).
 
 ### Inspection and maintenance
 
 `asl doctor PLAN_DIR --harness codex|claude|copilot` checks a plan's harness and path prerequisites before its first run; `asl tail PLAN_DIR_OR_ID` follows a plan's run events and harness logs (`--no-follow` prints once); `asl plans` lists discovered plan directories (filter with `--stale-days DAYS`, `--never-run` or `--readiness READINESS`); `asl review-verdict PLAN_DIR_OR_ID` prints the full final-review verdict with its continuation evaluation and remediation commands; `asl overseer scan|watch|inspect|...` is the CLI the `asl-overseer` skill drives to watch authorized runs; `asl gc [PLAN_DIR] [--max-age-days DAYS]` reclaims old run directories (dry-run unless `--apply`); and `asl unlock PLAN_DIR_OR_ID` removes a stale operational lock (`--force` even when it appears active).
 
-See `docs/agent-session-loop.md` for the split → expand → run workflow, the `$asl` Autopilot skill, and the Workbench security model, registry, cleanup/archive, Recovery Center, and smoke checklist.
+See `docs/agent-session-loop.md` for the split → expand → run workflow, the `$asl` Autopilot skill, the plan registry and discovery, and the recovery card payload.
 
 ## Plans and preparation
 
@@ -111,9 +105,6 @@ leaf-only group's help lists its leaves and none of their flags, `asl bridge`,
 `asl control`, `asl control guard`, `asl inbox`, `asl outbox`,
 `asl assurance`, `asl diagnostics`, `asl maintenance`, `asl agent-mux`, and
 `asl overseer` each say so and name the leaf help to read instead, such as `asl outbox supervise --help`.
-`asl workbench` instead carries the serve flags on the parent parser, so its
-help shows them and its epilogue says the bare `asl workbench` form runs
-`asl workbench serve` with those flags.
 
 The eight mailbox commands are `asl inbox guidance`, `asl inbox reply`,
 `asl inbox resolve`, `asl inbox read`, `asl ask`, `asl notify`,
@@ -182,8 +173,8 @@ changes only future implementation invocations in the current runner process.
 It never changes an active subprocess or a generated review turn. The mailbox
 adds three private (`0600`) state files, eight commands, and one `mailbox` event
 name with body-free action variants; it adds no runner/supervisor thread, no
-terminal status, and no Workbench mailbox-authoring, reply, resolution, notice,
-or live model-control endpoint in v1.
+terminal status, and no HTTP mailbox-authoring, reply, resolution, notice, or
+live model-control endpoint in v1.
 
 ### Harness version compatibility
 
@@ -313,8 +304,8 @@ notice bodies.
 Hooks are one direction; `asl bridge serve --stdio --protocol 2` is the other.
 Agent Mux's daemon owns one bridge subprocess and uses it to render the active
 and actionable run corpus, and to reply, resolve, resume, stop-after-current,
-abort, and open a Workbench deep link — the same interventions the CLI and the
-Workbench expose, through the same service layer. It does not start, schedule,
+and abort — the same interventions the CLI exposes, through the same service
+layer. It does not start, schedule,
 or tail runs. Install or upgrade ASL *before* the client: a missing or
 protocol-incompatible bridge is reported as unavailable and leaves the client
 read-only rather than driving anything. The wire shape is pinned in
@@ -382,7 +373,6 @@ just test-fast
 just test-portable
 just test-all
 just reliability-stress
-just test-browser   # Workbench browser tests; needs Node and npm
 ```
 
 `just test-fast` runs the fast lane: every `tests/test*.py` module that does
@@ -400,28 +390,15 @@ The workflows in `.github/workflows/` are active: `check.yml` runs on every push
 to `main` and every pull request against it -- a Linux lane on Python 3.14
 and 3.15 (lint, `just test-portable`, the read-only
 `python3 -m agent_session_loop.startup_context --check --reference-only`
-staleness check, and the no-model `asl harness-compat --json` policy check), a
-Python 3.13 job that runs `python3.13 -m unittest -q tests.test_workbench_portable`
-to hold the portable Workbench to its remote host's interpreter, and a macOS
-lane (lint plus `just test-all`, sliced across parallel jobs);
-`workbench-browser.yml` runs `just test-browser` for changes under
-`tests/workbench_browser/`, `asl_workbench/`, the `agent_session_loop`
-modules the browser fixture server imports directly (`cli`, `events`,
-`plans_files`, `state` and every `workbench_*` module), or the shared
-`tests/workbench_support*.py` seeding (the rest of the CLI it reaches
-transitively is covered by the Python suite's own Workbench shell tests); and `harness-compatibility.yml` is a no-model-use
+staleness check, and the no-model `asl harness-compat --json` policy check) and a
+macOS lane (lint plus `just test-all`, sliced across parallel jobs); and
+`harness-compatibility.yml` is a no-model-use
 `asl harness-compat` smoke that runs weekly and for changes to
 `agent_session_loop/harness_compatibility.py`. A failed test job uploads
 `.cache/run_suite_logs/`, the full output of every failed shard. The same
 recipes run locally, and CI installs its linters from the `dev` dependency
 group in `pyproject.toml` (`python3 -m pip install --group dev`), so install
 that group to lint with the versions CI gates on.
-
-`just test-browser` drives the Workbench shell in real browsers through the
-development-only Playwright harness in `tests/workbench_browser/`, which is no
-dependency of either Workbench deployment. It needs Node and npm; it runs
-`npm ci` whenever `package-lock.json` is newer than the installed tree, then
-installs the pinned Chromium and WebKit engines before the tests.
 
 `just test-live-lifecycle codex` probes the installed version without model use.
 Add `--live --report /tmp/asl-lifecycle.json` to opt in to a disposable project's

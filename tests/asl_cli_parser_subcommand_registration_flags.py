@@ -133,7 +133,6 @@ class ParserSubcommandRegistrationTests(ParserSubcommandRegistrationTestsBase):
             (["gc", "--bogus"], "asl gc"),
             (["status", "/tmp/plan", "extra"], "asl status"),
             (["control", "abort", "/tmp/plan", "--bogus"], "asl control abort"),
-            (["workbench", "serve", "--bogus"], "asl workbench serve"),
         )
         for argv, leaf in cases:
             stderr = io.StringIO()

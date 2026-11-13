@@ -324,8 +324,8 @@ class RepositoryIntentTargetTests(RepositoryIntentFixtures):
         source = self.second / "plans" / "source.md"
         source.parent.mkdir(parents=True)
         source.write_text("# Source\n", encoding="utf-8")
-        sibling = source.parent / "companion.md"
-        sibling.write_text("# Companion\n", encoding="utf-8")
+        sibling = source.parent / "sibling.md"
+        sibling.write_text("# Sibling\n", encoding="utf-8")
         self._write_plan(self.first / "README.md")
         self._declare_source(str(source), cited_in_session=str(sibling))
 

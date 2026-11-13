@@ -7,14 +7,13 @@
   "component": "bridge_protocol",
   "definitions": {
     "Action": {
-      "description": "What a client may invoke against one row. A superset of `MutationMethod`: `workbench.ensure` changes no ASL state and so needs no handshake, but it is still offered on a row and still has a reason when it is unavailable. Appended to, never reordered -- the action token fingerprints this sequence, so moving an entry invalidates every token in flight.",
+      "description": "What a client may invoke against one row: exactly the mutation methods. Appended to, never reordered -- the action token fingerprints this sequence, so moving an entry invalidates every token in flight.",
       "enum": [
         "question.reply",
         "question.resolve",
         "run.resume",
         "run.stop_after_current",
         "run.abort",
-        "workbench.ensure",
         "run.redirect"
       ]
     },
@@ -147,7 +146,6 @@
         "frame-too-large",
         "internal-error",
         "mutation-failed",
-        "workbench-unavailable",
         "invalid-plan",
         "no-active-run",
         "run-mismatch",
@@ -197,15 +195,6 @@
       "enum": [
         "runs.changed",
         "operation.updated"
-      ]
-    },
-    "Focus": {
-      "description": "Workbench deep-link panels.",
-      "enum": [
-        "reply",
-        "verification",
-        "active",
-        "events"
       ]
     },
     "Handshake": {
@@ -343,7 +332,6 @@
         "run.resume",
         "run.stop_after_current",
         "run.abort",
-        "workbench.ensure",
         "run.redirect",
         "run.redirect_status",
         "run.recover_conversation"
@@ -1538,65 +1526,6 @@
         "warnings"
       ],
       "type": "object"
-    },
-    "WorkbenchLink": {
-      "additionalProperties": false,
-      "description": "A tokenized loopback deep link into one plan's detail view.",
-      "properties": {
-        "focus": {
-          "$ref": "#/definitions/Focus"
-        },
-        "plan_dir": {
-          "format": "canonical-path",
-          "type": "string"
-        },
-        "row_id": {
-          "maxLength": 64,
-          "minLength": 1,
-          "type": "string"
-        },
-        "url": {
-          "description": "Loopback only. A link that leaves the machine is not a deep link into a local Workbench.",
-          "maxLength": 2048,
-          "pattern": "http://127\\.0\\.0\\.1:[0-9]{1,5}/.*",
-          "type": "string"
-        }
-      },
-      "required": [
-        "focus",
-        "plan_dir",
-        "row_id",
-        "url"
-      ],
-      "type": "object"
-    },
-    "WorkbenchLinkResponse": {
-      "additionalProperties": false,
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "ok": {
-          "const": true
-        },
-        "protocol": {
-          "const": 2
-        },
-        "result": {
-          "$ref": "#/definitions/WorkbenchLink"
-        },
-        "type": {
-          "const": "response"
-        }
-      },
-      "required": [
-        "id",
-        "ok",
-        "protocol",
-        "result",
-        "type"
-      ],
-      "type": "object"
     }
   },
   "description": "UTF-8 NDJSON frames on stdio. Protocol 2 keeps every schema-1 shape and adds compatibility identity plus a mutation gate: the hello carries the contract-set ID and declares that mutations require a handshake, and `session.handshake` enables them only against a matching contract set and a snapshot digest the client has actually seen. Snapshots and events are body-free; `question.get` is the one deliberate exception and declares its exemption by pointer below.",
@@ -1623,8 +1552,7 @@
     "redirect_receipt_response": "RedirectReceiptResponse",
     "redirect_status_response": "RedirectStatusResponse",
     "runs_changed_event": "RunsChangedEvent",
-    "runs_snapshot_response": "RunsSnapshotResponse",
-    "workbench_link_response": "WorkbenchLinkResponse"
+    "runs_snapshot_response": "RunsSnapshotResponse"
   },
   "title": "ASL bridge protocol 2 frames",
   "version": 2

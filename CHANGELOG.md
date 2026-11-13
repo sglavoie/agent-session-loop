@@ -1,7 +1,7 @@
 # Changelog
 
-Notable changes to Agent Session Loop (`asl`), its portable Workbench
-(`asl_workbench`) and the ASL skills. The format follows
+Notable changes to Agent Session Loop (`asl`) and the ASL skills (and, through
+the release that removed it, the Workbench). The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version is
 `__version__` in `agent_session_loop/__init__.py`. Releases are cut with Agent
 Mux's paired release gate, which tags both repositories (see "Releasing the
@@ -430,8 +430,44 @@ A polish and hardening round after the public release.
   `session-run`, `asl`, `plan-preflight-iterate` and `session-resplit` follow:
   `asl prepare` then `asl run` is the default path, and invoking `session-run`
   once per conversation is described as manual mode.
+- Bridge protocol 2 drops `workbench.ensure` and the `workbench-unavailable`
+  error code, so rows no longer offer the action and the action token
+  fingerprints the shorter list; the contract set is now
+  `asl-amx-1.827fc9974d8f37c0`, and Agent Mux must vendor the matching corpus.
+  An oversized `question.get` body names `asl questions` as its
+  `details.fallback`.
+- Runs started by `plan_launch.launch_plan` carry the invocation origin
+  `plan-launch` (it was `workbench`); traces recorded before the change keep
+  `workbench` in `asl metrics` until they age out.
+- `asl gc` no longer reports an `archive` block, in text or JSON.
+- Recovery cards in `asl plans --json` drop `actions` and the compact
+  `primary_action`: they were buttons for Workbench routes that no longer
+  exist. Evidence, summaries and the copy-only `commands` carry the recovery.
+- The operations journal admits only `plan.launch`, `plan.reply` and
+  `question.reply`, the methods the bridge's launch and resume paths use; the
+  Workbench-only methods and the remote-connector method aliases are gone.
+- The plan registry is `~/.config/agent-session-loop/plans.json`; the old
+  `workbench.json` is no longer read, and `archive_retention_days` is gone.
+- Modules that outlived the Workbench are renamed: `workbench_summary*` to
+  `plan_summary*`, `workbench_recovery_*` to `recovery_card_*`,
+  `workbench_controls*` to `control_service*`, `workbench_registry*` to
+  `plan_pins*`, `workbench_discovery` to `plan_scan`, `workbench_launch` to
+  `plan_launch`, `workbench_workspace` to `plan_workspace`, `workbench_actions`
+  to `run_actions`, `workbench_operations` and `workbench_operation_*` to
+  `operation_store`, `operation_journal`, `operation_evidence` and
+  `operation_mutations`, and `workbench_cli` to `plans_cli`. The rule modules
+  from `asl_workbench` live in `agent_session_loop` as `control_rules`,
+  `action_rules`, `operation_rules*` and `utc_timestamps`.
 
 ### Removed
+
+- The Workbench: the `asl workbench` command group (`serve`, `connect`, `pin`,
+  `unpin`, `registry`), the `asl_workbench` package with its web UI, HTTP API,
+  remote service, connector and uplink, the plan archive, the Playwright
+  browser tests with their `just test-browser` recipe and CI workflow, and the
+  Python 3.13 portable-Workbench CI job. `asl plans` and the supervision
+  bridge keep the plan summaries, recovery cards and run controls the
+  Workbench shared with them.
 
 - The `plan-ideal` skill, a read-only alias for `plan-iterate --ideal-only`.
   Rerun `install.py` to prune its installed link.

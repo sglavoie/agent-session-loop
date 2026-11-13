@@ -218,7 +218,7 @@ duplicates raw guidance, question, reply, resolution-note, or notice text, and
 closed waits do not increment pause metrics because those metrics count only
 `run_paused`.
 
-Workbench intentionally has no mailbox-authoring, mailbox-reply,
+ASL intentionally has no HTTP surface, and so no mailbox-authoring, mailbox-reply,
 mailbox-resolution, mailbox-notice, or live model-control endpoint in v1.
 Mailbox rotation/compaction, automatic
 interrupt-and-restart, plan/session queue mutation, and live session-budget

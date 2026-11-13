@@ -34,7 +34,7 @@ class _Corpus:
         )
 
     def paused_plan(self, name: str = "plan-alpha") -> Path:
-        plan_dir = _make_workbench_plan(self.plans_root, name)
+        plan_dir = _make_summary_plan(self.plans_root, name)
         artifact_dir = state.plan_state_dir(plan_dir, self.state_root) / "runs"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         last_message = artifact_dir / "last-message.txt"
@@ -64,10 +64,10 @@ class _Corpus:
         return plan_dir
 
     def ready_plan(self, name: str = "plan-ready") -> Path:
-        return _make_workbench_plan(self.plans_root, name)
+        return _make_summary_plan(self.plans_root, name)
 
     def recent_plan(self, name: str = "plan-recent") -> Path:
-        plan_dir = _make_workbench_plan(self.plans_root, name)
+        plan_dir = _make_summary_plan(self.plans_root, name)
         self.write_state(
             plan_dir,
             {
@@ -99,7 +99,7 @@ class _Corpus:
         return canonical
 
     def running_plan(self, name: str = "plan-running") -> Path:
-        plan_dir = _make_workbench_plan(self.plans_root, name)
+        plan_dir = _make_summary_plan(self.plans_root, name)
         _write_lock_file(
             plan_dir,
             self.state_root,
@@ -125,7 +125,7 @@ class _Corpus:
         return plan_dir
 
     def waiting_plan(self, name: str = "plan-waiting") -> Path:
-        plan_dir = _make_workbench_plan(self.plans_root, name)
+        plan_dir = _make_summary_plan(self.plans_root, name)
         _write_lock_file(
             plan_dir,
             self.state_root,

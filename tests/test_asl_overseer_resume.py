@@ -54,8 +54,8 @@ from agent_session_loop import (
     overseer_decisions,
     overseer_resume,
     pause_policy,
+    plan_pins_models,
     run_entry_resume,
-    workbench_registry_models,
 )
 from tests import support_asl_overseer_resume as fixtures
 from tests.support import (
@@ -115,8 +115,7 @@ class LaunchRestoration(fixtures._ResumeCase):
 
     def test_the_profile_fields_are_the_launchers_own_fields(self) -> None:
         declared = {
-            field.name
-            for field in dataclasses.fields(workbench_registry_models.LaunchProfile)
+            field.name for field in dataclasses.fields(plan_pins_models.LaunchProfile)
         }
         self.assertEqual(declared, set(overseer_resume.PROFILE_FIELDS))
 

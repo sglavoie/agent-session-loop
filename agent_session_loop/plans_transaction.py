@@ -45,7 +45,7 @@ PLAN_TRANSACTION_SCHEMA_VERSION = 1
 
 # Transaction publication is normally a short rename-and-replace sequence. A
 # holder that exceeds this bound is treated as stalled so read-side recovery
-# fails diagnostically instead of hanging status and Workbench consumers.
+# fails diagnostically instead of hanging status and plan-summary consumers.
 PLAN_TRANSACTION_LOCK_WAIT_SECONDS = 5.0
 
 

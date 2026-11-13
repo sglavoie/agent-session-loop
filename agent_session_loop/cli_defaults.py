@@ -38,16 +38,9 @@ def program_name(argv0: str | None = None) -> str:
 
 
 # Build-time defaults mirrored from heavier modules so light commands do not
-# import `metrics` (pulls in review/compact-state) or `workbench_server` (pulls
-# in the whole workbench subsystem) merely to build the parser. The
+# import `metrics` (pulls in review/compact-state) merely to build the parser. The
 # `test_cli_build_time_default_constants_match_source_modules` guard keeps these
 # in sync with their authoritative definitions.
-_WORKBENCH_DEFAULT_HOST = "127.0.0.1"  # workbench_server.DEFAULT_HOST
-
-
-_WORKBENCH_DEFAULT_PORT = 8765  # workbench_server.DEFAULT_PORT
-
-
 _METRICS_DEFAULT_SINCE_DAYS = 7  # metrics.DEFAULT_SINCE_DAYS
 
 

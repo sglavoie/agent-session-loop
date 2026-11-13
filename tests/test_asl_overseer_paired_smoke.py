@@ -131,7 +131,7 @@ def setUpModule() -> None:
         # compatibility: an `asl` from somewhere else is not this pair installed
         # badly, it is this pair not installed at all, and judging it would
         # report on a version neither half of this checkout wrote. A copy of the
-        # repository at a second path -- a worktree, a workbench, a release
+        # repository at a second path -- a worktree, a scratch copy, a release
         # staging tree -- is exactly that case, and a legitimate one.
         _unavailable(
             f"the installed `asl` wrapper resolves to {wrapper}, which is "

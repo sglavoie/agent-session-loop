@@ -90,7 +90,7 @@ Common pause reasons:
   create a clean new commit — a nonzero exit, a zero-exit no-op that leaves
   `HEAD` unchanged, or a command that changes `HEAD` but leaves tracked or
   untracked Git status behind — no longer pauses; it is recorded, retried, and
-  reported. Runs recorded before that change, and the Recovery Center entries
+  reported. Runs recorded before that change, and the recovery cards
   built from them, still carry this reason with details identifying the failed
   alias, successful repository SHAs, remaining aliases, and repo-qualified
   artifacts.

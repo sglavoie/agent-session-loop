@@ -142,22 +142,22 @@ path.
 `outcome` is one of `ok`, `failed`, `help`, `usage`, `interrupted`, or
 `exception`. `help_depth` is `root`, `group`, or `leaf` on a `--help` exit and
 null otherwise. `origin` comes from the internal `ASL_INVOCATION_ORIGIN`
-allowlist (`direct`, `autopilot`, `workbench`, `install-verify`); any other
+allowlist (`direct`, `autopilot`, `plan-launch`, `install-verify`); any other
 value is recorded as `other`, and an unset variable means `direct`.
 
 Every launcher that spawns an `asl` child marks it, so a supervisor reading
 `asl metrics` can tell their own calls apart from internal automation. The
 autopilot helper's central child environment marks its `asl run`, `asl status`,
-and `asl questions` subprocesses as `autopilot`; `workbench_launch.launch_plan` marks
-its `python -m agent_session_loop run` child as `workbench`; and the install
+and `asl questions` subprocesses as `autopilot`; `plan_launch.launch_plan` marks
+its `python -m agent_session_loop run` child as `plan-launch`; and the install
 verifier marks its `asl status --json` smoke call as `install-verify`. Anything
 left is `direct`. The marker is always applied **after** the launcher's other
 environment work — after the autopilot helper overlays the supervised command's
-own `NAME=VALUE` assignments, and after a Workbench caller's `env` mapping —
+own `NAME=VALUE` assignments, and after a launch caller's `env` mapping —
 because attribution belongs to the process doing the launching. A supervised
 command that sets `ASL_INVOCATION_ORIGIN=direct` therefore cannot disguise
 automation as an operator call, and every other caller-provided entry is
-preserved untouched. A Workbench launch that passes no `env` at all still
+preserved untouched. A plan launch that passes no `env` at all still
 materializes the inherited environment so the marker reaches the child.
 
 A successful parse traces under its effective `--state-dir`. A `--help` or

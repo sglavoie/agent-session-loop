@@ -1,8 +1,8 @@
 """Read-only operator, metrics, and retention projections over assurance.
 
 Every surface an operator reads — the end of ``asl run``, ``asl status``, ``asl
-metrics``, ``asl gc``, the Workbench queue, and the Autopilot supervision
-result — needs to answer the same question: did the last run find anything, and
+metrics``, ``asl gc``, ``asl plans``, and the Autopilot supervision result —
+needs to answer the same question: did the last run find anything, and
 what is still open. This module is the single place that answers it, and it is
 deliberately unable to do anything else:
 
@@ -17,9 +17,9 @@ deliberately unable to do anything else:
   needs ledger truth degrades to an explicit ``available: False`` with the
   reason, because a status command that dies on a corrupt inbox is worse than
   one that says the inbox could not be read.
-* **Bounded output stays bounded.** The summaries carried through the Workbench
-  and Autopilot cap their issue lists and flag the truncation, so a run that
-  opened two hundred issues cannot inflate a queue payload.
+* **Bounded output stays bounded.** The summaries carried through plan
+  summaries and Autopilot cap their issue lists and flag the truncation, so a
+  run that opened two hundred issues cannot inflate a snapshot payload.
 """
 
 from __future__ import annotations

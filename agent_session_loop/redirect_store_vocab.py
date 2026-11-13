@@ -6,8 +6,7 @@ everything the control queue does not: ``control-queue.jsonl`` is read with
 ``ftruncate`` and deduplicated in the draining process's memory, which makes it
 a fine transport for "drain now" and an impossible authority for "this
 correction was submitted and has not been answered yet". This journal is that
-authority. Run state, events, Workbench, and bridge receipts are projections of
-it.
+authority. Run state, events, and bridge receipts are projections of it.
 
 Four properties are structural rather than incidental:
 
@@ -243,8 +242,8 @@ SETTLEMENT_REASONS: tuple[SettlementReason, ...] = (
     REASON_OPERATOR_CANCELLED,
 )
 
-# Failures raised to a caller. Stable strings so the CLI, the Workbench, and
-# the bridge all say the same thing about the same refusal.
+# Failures raised to a caller. Stable strings so the CLI and the bridge both
+# say the same thing about the same refusal.
 ERROR_JOURNAL_READ = "redirect-journal-read"
 ERROR_JOURNAL_WRITE = "redirect-journal-write"
 ERROR_JOURNAL_FULL = "redirect-journal-full"

@@ -65,8 +65,8 @@ If a plan has no pending sessions but is not complete, inspect every final
 Atomic plan publication and recovery are serialized by a marker-scoped plan
 transaction lock. Plan reads wait up to five seconds for the publication to
 finish and then fail instead of hanging indefinitely. This timeout can surface
-from plan reads behind `asl status`, `asl tail`, `asl prepare`, and the
-Workbench API.
+from plan reads behind `asl status`, `asl tail`, `asl prepare`, `asl plans`,
+and the supervision bridge.
 
 The diagnostic names the lock path and the pid, hostname, and thread of the
 process that held the lock when it was acquired. Those holder fields identify
@@ -149,12 +149,10 @@ lock, and any live pid all survive. `asl gc` is the one command exempt from all
 of this: it has promised to write nothing in dry-run and to touch only run
 directories under `--apply`, so it inspects locks without reclaiming them in
 either mode. `asl unlock` remains the only route out for
-a cross-host lock; the rest are taken over by the next `asl run`. The Workbench
-read endpoints are exempt too, and for the same reason `asl gc` is: they build
-every summary with `reclaim=False`, so refreshing the queue or opening a plan
-observes a stale lock and reports it without removing it. Reclaim on the
-Workbench stays where an operator asked for it — the Recovery Center flow and
-`POST /api/unlock`. Every
+a cross-host lock; the rest are taken over by the next `asl run`. Bridge
+snapshots are exempt too, and for the same reason `asl gc` is: they build
+every summary with `reclaim=False`, so a refresh observes a stale lock and
+reports it without removing it. Every
 mutation of `lock.json` — a read-side reclaim, a stale takeover, publishing a
 new lock, `asl unlock`, and the release at the end of a run — runs under an
 exclusive `flock` on a `lock.mutex` sidecar in the plan's state directory. The
@@ -240,126 +238,25 @@ prompt and the in-harness reply prompt side-by-side without invoking the
 harness, consuming the paused state, or writing the preview payload to
 `state.json`/`events.jsonl`.
 
-## Workbench
+## Plan registry, launches, and discovery
 
-`asl workbench [serve]` runs a stdlib-only HTTP control plane that
-surfaces every plan ASL can see in one local browser UI. It is
-intentionally loopback, single-user software: there is no remote-access
-mode, no multi-tenant auth, and no scheduling logic beyond a thin
-renderer over the runner, registry, cleanup/archive storage, control
-queue, launch, and unlock helpers.
+`asl plans` and the supervision bridge list every plan ASL can see. They read
+the same discovery sources and the same per-plan summaries, so a plan the
+bridge shows is a plan `asl plans` lists.
 
-```bash
-asl workbench
-asl workbench serve
-asl workbench serve --port 0 --open
-asl workbench --plan-root ~/work/plans --plan-root ~/.local/share/agent-plans
-asl workbench serve --state-dir /tmp/asl-state --json
-```
+### Launches and replies
 
-The bare `asl workbench` invocation defaults to `serve`; the same
-flags (`--host`, `--port`, `--state-dir`, `--plan-root`, `--open`,
-`--json`) are accepted on both the parent and the subcommand so either
-position works.
-
-The server binds `127.0.0.1:8765` by default. `--port 0` selects an
-ephemeral port (useful for tests or for running multiple workbenches side
-by side). `--state-dir DIR` mirrors the same flag on `asl run`; `--plan-root
-DIR` may be passed multiple times to add extra directories to plan
-discovery. `--open` best-effort launches the default browser at the
-tokenized URL; the URL and token are also printed regardless, so the
-operator can paste them by hand if the browser cannot be opened. `--json`
-prints a startup payload (`reason: serving`, `host`, `port`, `url`,
-`token`) instead of human text and the server still blocks until exit.
-
-CLI registry maintenance commands let operators manage pins without
-opening the UI:
-
-```bash
-asl workbench pin /path/to/plan-dir
-asl workbench pin /path/to/plan-dir --cwd /path/to/repo --label "Refactor"
-asl workbench unpin /path/to/plan-dir
-asl workbench registry --json
-```
-
-`pin` upserts a registry entry for the canonical `plan_dir`; `--cwd`
-sets the optional legacy repository root and `--label` sets the optional
-human-readable name. Registered pins additionally project their prepared
-`workspace_root`, registry digest, and complete ordered repositories. Their
-launches always use that binding; a conflicting saved root is rejected with
-`asl prepare PLAN_DIR --resume --cwd NEW_WORKSPACE --rebind-workspace`
-guidance. Other launch-profile fields stay `null` (runner
-default) unless edited through the UI. `unpin` removes the matching
-pin. `registry` prints the loaded registry (pins, `plan_roots`, and
-any loader warnings); pass `--json` for the
-`responses.success_payload`-shaped envelope used elsewhere in the CLI.
-
-Queue/detail summaries, launch results, state, Recovery Center, and final-review
-responses retain `cwd` for compatibility and add `workspace_root`,
-`registry_digest`, and ordered `repositories`. Recovery evidence identifies
-repository-qualified failed checks, retained scope violations, unavailable Git
-evidence, unresolved commit groups, and partial per-repository commit SHAs.
-`GET /api/final-review` also returns the bounded Markdown view plus parsed
-`final-review.json` when available, preserving finding repository attribution
-and repair-group scopes. Browser and terminal summaries show a bounded prefix
-for very large registries; machine-readable vectors remain complete. The
-browser's `formatRepositoryAliases` formatter is the authoritative source for
-its 12-repository preview limit.
-
-The console output for a normal start is:
-
-```text
-Workbench serving on http://127.0.0.1:8765
-Authorization token: <opaque secrets.token_urlsafe(32) value>
-```
-
-Open `http://127.0.0.1:8765/?token=<token>` (or use `--open`). The
-frontend strips `?token=...` from the URL after first load and persists
-it in `sessionStorage`; refreshing the tab keeps the token. The token is
-regenerated on every server start, so existing tabs need a fresh URL
-after a restart.
-
-### Security model
-
-- The default bind is `127.0.0.1`; the server never reaches outside the
-  local host without an SSH tunnel or other operator-initiated forward.
-- Every mutating endpoint (`POST /api/registry/pin`,
-  `POST /api/registry/unpin`, `POST /api/plan/archive`,
-  `POST /api/plans/archive`, `POST /api/plan/delete`,
-  `POST /api/archive/restore`, `POST /api/archive/delete`,
-  `POST /api/archive/settings`, `POST /api/launch`,
-  `POST /api/reply`, `POST /api/question-reply`, `POST /api/control/...`,
-  `POST /api/unlock`)
-  requires
-  an `Authorization: Bearer <token>` header. The token is generated with
-  `secrets.token_urlsafe(32)` at startup and compared with
-  `secrets.compare_digest`.
-- Read endpoints (`GET /api/queue`, `/api/plan`, `/api/recovery`,
-  `/api/state`,
-  `/api/events`, `/api/logs`, `/api/last-message`, `/api/result`,
-  `/api/verification`, `/api/commits`, `/api/progress`,
-  `/api/final-review`, `/api/questions`, `/api/registry`,
-  `/api/archive`, `/api/artifacts`, `/api/redirect-status`,
-  `/api/conversation-recovery`) are **not** authenticated. They are
-  loopback-only by construction. If
-  the Workbench is ever exposed beyond the local machine (e.g., SSH port
-  forwarding, a reverse proxy), plan inventory and resolver prompts —
-  including paused-Q&A `last-message` text — will leak. Treat the URL the
-  same way as any other unauthenticated local devtool.
 - Reply text only ever travels through the child process stdin via
-  `asl run --reply-stdin`. `POST /api/reply` accepts the operator answer
-  in the JSON body and forwards it to `workbench_launch.resume_plan_with_reply`,
-  which writes it to the child stdin and discards the byte buffer. The
+  `asl run --reply-stdin`. A bridge `run.resume` carrying a reply hands it
+  to `plan_launch.resume_plan_with_reply`, which writes it to the child stdin
+  and discards the byte buffer. The
   reply text is never persisted in `state.json`, `events.jsonl`, argv,
   or turn artifacts; only the character count surfaces (as
   `reply_length`) on the launch result and `REPLY_PROVIDED_EVENT`.
-- Stop controls are checkpoint-only and never terminate an active
-  harness subprocess. They are equivalent to typing `p`, `1`/`2`/`3`,
-  etc. at a text TTY runner.
-- Every `python -m agent_session_loop run` child the Workbench spawns —
-  including the intervention and `--resume` launches — carries
-  `ASL_INVOCATION_ORIGIN=workbench`, so `asl metrics` attributes those
-  runs to the Workbench rather than to a supervisor at a terminal. That
+- Every `python -m agent_session_loop run` child `plan_launch.launch_plan`
+  spawns — including the bridge's resume launches — carries
+  `ASL_INVOCATION_ORIGIN=plan-launch`, so `asl metrics` attributes those
+  runs to a launcher rather than to a supervisor at a terminal. That
   marker and — on an `isolate_locks=True` launch — `ASL_LOCK_ISOLATION=1`
   are the only entries `launch_plan` sets; a caller-supplied `env`
   mapping is otherwise passed through unchanged, and a launch with no
@@ -371,31 +268,13 @@ after a restart.
   plan's proven-dead lock. It is set only by launchers authorized one
   plan at a time — today, the overseer's environmental-recovery resume
   through `intervention.resume_recovered_run`. An operator-driven
-  launch, including `asl run` and the Workbench's own reply resume, sets
+  launch, including `asl run` and a bridge reply resume, sets
   nothing and keeps the ordinary corpus-wide hygiene. The variable is
   internal, presence-checked rather than value-checked, and never
   documented as an operator knob: setting it by hand only turns off
   stale-lock cleanup for that one run.
-- The Recovery Center is a read-only diagnosis layer. It may display
-  copyable repair commands, but the Workbench never executes those
-  commands. Action cards only route to existing affordances and
-  endpoints (`/api/reply`, `/api/launch`, `/api/unlock`, or local
-  detail-panel focus targets).
-- `--unsafe-bypass` is still the runner default. The Workbench launch
-  form surfaces the choice and the UI confirms the launch before
-  spawning a child with bypass mode set, but flipping the toggle does
-  not change global runner defaults.
-- The supervision bridge can host a Workbench listener of its own.
-  `workbench.ensure` lazily starts one server on `127.0.0.1` with an
-  ephemeral port and a freshly generated token, hands back a
-  `/?token=...#plan?dir=...&focus=...` deep link, reuses that same server
-  for every later request, and stops it when the bridge process exits.
-  The security properties above apply unchanged: the token guards the
-  same mutating endpoints, the read endpoints stay unauthenticated, and
-  the listener is loopback-only. What differs is lifetime and
-  disclosure — the URL carries a token in its query string, so treat it
-  as a credential rather than a bookmark, and the listener dies with the
-  bridge rather than outliving the client that asked for it.
+- Recovery cards are a read-only diagnosis layer. They may carry copyable
+  repair commands, but ASL never executes those commands on a card's behalf.
 - The bridge decides what a supervision client is even able to record. A
   snapshot carries identifiers, counts, states, and timestamps; question
   and reply prose reaches a client only through a deliberate
@@ -411,60 +290,39 @@ after a restart.
 
 ### Registry, pins, launch profiles
 
-The Workbench registry is a JSON file stored at
-`$XDG_CONFIG_HOME/agent-session-loop/workbench.json` (default
-`~/.config/agent-session-loop/workbench.json`). Schema version `2`. The
-file is hand-editable; malformed pin or root entries become recoverable
-warnings on the loaded registry rather than failing the server.
+The plan registry is a JSON file stored at
+`$XDG_CONFIG_HOME/agent-session-loop/plans.json` (default
+`~/.config/agent-session-loop/plans.json`). Schema version `2`. The
+file is hand-edited; malformed pin or root entries become recoverable
+warnings on the loaded registry rather than failing the read. No command
+writes it.
 
 Pins record:
 
 - `plan_dir` — canonical absolute path (deduplicated).
-- `label` — optional human-readable name shown in the UI.
+- `label` — optional human-readable name a plan listing shows.
 - `profile` — optional `LaunchProfile` defaulting all fields to `null`.
   Recognized fields mirror `asl run` flags: `cwd`, `harness`,
   `harness_model`, `effort`, `timeout`, `commit_mode` (`per-session` or
   `end`), `review_harness`, `review_harness_model`, `unsafe_bypass`,
-  `allow_not_loop_ready`, and `note`. `null` means "no preference"; the
-  workbench falls back to the runner default. `review_harness` must differ
+  `allow_not_loop_ready`, and `note`. `null` means "no preference"; a
+  launch falls back to the runner default. `review_harness` must differ
   from `harness`, and `review_harness_model` requires `review_harness`.
+  The nullable booleans (`unsafe_bypass`, `allow_not_loop_ready`) are
+  tri-state: `null` emits **no** `--unsafe-bypass` and **no**
+  `--no-unsafe-bypass` argv and leaves the runner default in place.
 
 Schema-v1 registries remain readable, but a legacy `profile.model` is ignored
 and surfaced as a recoverable warning; it is never forwarded to `asl run`.
-The next pin/profile save writes schema v2 with `harness_model` and
-`review_harness_model` only, permanently dropping the legacy shared field.
 
-  The nullable booleans (`unsafe_bypass`, `allow_not_loop_ready`) are
-  surfaced in the UI as tri-state `<select>` controls with literal
-  `(default)`, `enabled`, and `disabled` options that round-trip
-  `null`/`true`/`false` through the registry without coercion. The
-  blank/default state emits **no** `--unsafe-bypass` and **no**
-  `--no-unsafe-bypass` argv — it leaves the runner default
-  (`--unsafe-bypass` today) in place. `enabled` adds
-  `--unsafe-bypass` / `--allow-not-loop-ready`; `disabled` adds
-  `--no-unsafe-bypass` (`allow_not_loop_ready=false` intentionally has
-  no negative flag because the runner has no opposite of
-  `--allow-not-loop-ready`).
+Registered pins additionally project their prepared `workspace_root`,
+registry digest, and complete ordered repositories. Plan summaries, launch
+results, and recovery cards retain `cwd` for compatibility and add
+`workspace_root`, `registry_digest`, and ordered `repositories`.
 
-Concurrent pin/unpin writes (e.g., two browser tabs) are serialized
-through an advisory `fcntl.flock` on a sidecar file
-`workbench.json.lock` next to the registry. The lock file is created
-lazily on first write and inherits the same per-user permissions as the
-registry. The atomic write itself uses `tempfile.mkstemp` plus
-`os.replace`.
-
-`plan_roots` is a list of extra discovery directories the operator
-wants surfaced. They are merged with any `--plan-root` CLI overrides
-and the well-known defaults. Registry roots are scanned alongside
-CLI-supplied roots and both flow through `/api/queue` under the
-canonical `plan-root` discovery source label, so the queue surfaces
-plans from registry `plan_roots` even when the operator did not pass
-`--plan-root` on the command line.
-
-The registry also stores `archive_retention_days`, default 30 days.
-Invalid or missing values load as the default with a recoverable warning,
-and `POST /api/archive/settings` is the supported way for the UI to
-update the retention window.
+`plan_roots` is a list of extra discovery directories. Registry roots are
+scanned alongside caller-supplied roots, and both report the canonical
+`plan-root` discovery source label.
 
 ### Plan discovery
 
@@ -472,9 +330,10 @@ Discovery sources, in stable canonical order, are:
 
 - `state` — every per-plan directory under the resolved ASL state root
   (e.g., `~/.local/state/agent-session-loop/<plan-hash>/`).
-- `registry` — `plan_dir` for every pin in `workbench.json`.
-- `plan-root` — the union of registry `plan_roots`, CLI
-  `--plan-root DIR` values, and `$AGENT_PLANS_DIR` when set.
+- `registry` — `plan_dir` for every pin in `plans.json`.
+- `plan-root` — the union of registry `plan_roots`, `--plan-root DIR`
+  values a caller passes (the bridge's `asl bridge serve`), and
+  `$AGENT_PLANS_DIR` when set.
 - `agent-plans-dir` — `$AGENT_PLANS_DIR` itself when present.
 - `tmp-default` — `$TMPDIR/agent-plans` if it exists.
 - `share-default` — `$XDG_DATA_HOME/agent-plans` (or
@@ -484,7 +343,3 @@ A plan-root directory is scanned for immediate children that contain
 both `manifest.md` and `context.md`; nothing deeper is walked. Each
 discovered plan dedup-merges across sources and preserves the full list
 of sources that surfaced it.
-
-Archived entries live under `<state-root>/archive/<archive_id>/`.
-Archive storage is outside normal plan-root discovery, so archived plans
-do not reappear in the queue until they are restored.

@@ -327,7 +327,7 @@ where stdin or stderr is not a TTY.
 
 `asl control` is the programmatic equivalent of those keys, so a supervising
 agent driving `run --json` can still request them. Each subcommand appends one
-command to the same durable per-plan control queue the Workbench HTTP API feeds
+command to the same durable per-plan control queue the supervision bridge feeds
 (`control-queue.jsonl`); the runner drains it at its lifecycle checkpoints and
 applies the identical transition the keyboard listener emits. Nothing else is
 mutated — the runner alone owns `state.json`.
@@ -392,7 +392,7 @@ traceback. Any other command rejected by the durable queue fails with
 [Run-scoped guards](09-run-scoped-guards.md#run-scoped-guards).
 
 Every producer that appends to the queue — the `asl control` subcommands and
-the Workbench control endpoints alike — then sends a best-effort wakeup so the
+the bridge's run controls alike — then sends a best-effort wakeup so the
 runner drains the queue immediately instead of waiting out its `5.0`-second
 control poll. The wakeup is a single byte written to the FIFO recorded as
 `wakeup_endpoint` in the plan's `lock.json`, and its outcome is reported as a

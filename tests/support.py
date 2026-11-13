@@ -19,7 +19,7 @@ from . import (
     support_review as _support_review,
 )
 from . import (
-    support_workbench as _support_workbench,
+    support_run_state as _support_run_state,
 )
 
 _COMPONENTS = (
@@ -28,7 +28,7 @@ _COMPONENTS = (
     _support_git,
     _support_processes,
     _support_review,
-    _support_workbench,
+    _support_run_state,
     _support_prepare,
 )
 for _component in _COMPONENTS:

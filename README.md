@@ -2,7 +2,7 @@
 
 Agent Session Loop (`asl`): run split agent session plans one session at a
 time — prepare, preflight, run, supervise, review, and inspect them — plus the
-portable ASL Workbench and the shared planning and supervision skills.
+shared planning and supervision skills.
 
 > **Status:** a personal tool, published as-is under the [MIT License](LICENSE).
 > It is built around the author's own setup (macOS, the Claude Code, Codex and
@@ -75,11 +75,10 @@ and helper, and the rendered startup card in every discovered harness root
 all resolve to this checkout. Set `ASL_CLAUDE_CONFIG_DIRS` in the shell that
 runs it too, or the extra profiles are not checked.
 
-The launchd jobs ASL and the Workbench install (the maintenance job and the
-Workbench connector) are labelled `com.sglavoie.*`. Set
-`ASL_LAUNCHD_LABEL_PREFIX` (for example `org.example`) before installing them
-to use your own prefix; uninstall an existing job before changing it, or the
-old one is left behind.
+The launchd job ASL installs (the maintenance job) is labelled
+`com.sglavoie.*`. Set `ASL_LAUNCHD_LABEL_PREFIX` (for example `org.example`)
+before installing it to use your own prefix; uninstall an existing job before
+changing it, or the old one is left behind.
 
 ## First run
 
@@ -114,7 +113,6 @@ command to the `asl` skill (`/asl asl run ...` in Claude Code). The
 - [docs/asl-guide.md](docs/asl-guide.md) — ASL operator guide: command families, live supervision, assurance, Agent Mux integration, releasing, and testing
 - [docs/agent-session-loop.md](docs/agent-session-loop.md) — the complete ASL reference
 - [agent_session_loop/README.md](agent_session_loop/README.md) — package layout and internals
-- [asl_workbench/README.md](asl_workbench/README.md) — the portable Workbench package: module inventory, deployment, and portability boundaries
 
 ## Related
 
@@ -133,12 +131,10 @@ just test-fast
 just test-portable
 just test-all
 just reliability-stress
-just test-browser   # Workbench browser tests; needs Node and npm
 ```
 
 Stdlib `unittest` only. CI (`.github/workflows/`) runs a portable Linux lane
-and the full suite on macOS, plus `just test-browser` when the Workbench shell
-or its browser harness changes. See [Testing in the ASL guide](docs/asl-guide.md#testing)
+and the full suite on macOS. See [Testing in the ASL guide](docs/asl-guide.md#testing)
 for what each recipe covers.
 
 `just test-live-recovery codex` probes the installed version without model use.
@@ -161,11 +157,10 @@ Python code (config in `pyproject.toml`).
 ## Dependencies
 
 - macOS for ASL itself: the full suite gates on it, and the scheduled
-  maintenance job and the Workbench connector are launchd jobs. The core CLI
-  and the portable lane also run on Linux (CI checks that), where
-  `asl maintenance install` reports that no launchd job is possible. The
-  portable Workbench service targets a Linux host under a systemd user unit.
-- Python 3.14+ (`asl_workbench` stays importable on 3.13 for its remote host)
+  maintenance job is a launchd job. The core CLI and the portable lane also
+  run on Linux (CI checks that), where `asl maintenance install` reports that
+  no launchd job is possible.
+- Python 3.14+
 - `git`, `just`
 - `ruff`, `mypy`, `shellcheck` for `just lint`
 - At least one harness CLI for real runs: `claude` (Claude Code), `codex` or

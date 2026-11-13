@@ -145,8 +145,8 @@ def _collect_plan_dir_strings(state_dir: Path) -> list[str]:
 def iter_plan_state_dirs(state_root: Path) -> Iterator[Path]:
     """Yield per-plan state directories under ``state_root``.
 
-    Only digest-named children are plans; siblings such as the Workbench
-    ``archive/`` directory are skipped.
+    Only digest-named children are plans; siblings such as ledgers and
+    lock files are skipped.
 
     A missing root scans as an empty corpus. A root that exists but is not a
     directory, or that cannot be enumerated, raises :class:`StateError`.

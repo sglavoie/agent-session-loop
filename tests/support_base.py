@@ -36,6 +36,8 @@ from agent_session_loop import (
     config,
     control_signal,
     events,
+    plan_pins,
+    plan_pins_models,
     plans_content_hash,
     plans_files,
     plans_models,
@@ -48,8 +50,6 @@ from agent_session_loop import (
     review_session_body,
     run_control,
     state,
-    workbench_registry,
-    workbench_registry_models,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

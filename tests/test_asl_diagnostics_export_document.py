@@ -24,7 +24,7 @@ class ExportShapeTests(ExportTestBase):
         self.assertIn("limits", document)
         self.assertIn("redaction_policy", document)
 
-    def test_workbench_archive_is_not_scanned_as_a_plan(self) -> None:
+    def test_archive_directory_is_not_scanned_as_a_plan(self) -> None:
         (self.state_dir / "archive" / "entry").mkdir(parents=True)
         document = self.export()
         self.assertEqual(document["counts"]["plans_scanned"], 0)

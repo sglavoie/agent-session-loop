@@ -11,40 +11,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 
-from .cli_defaults import (
-    _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
-    _WORKBENCH_DEFAULT_HOST,
-    _WORKBENCH_DEFAULT_PORT,
-)
-
-#: The serve flags, by public ``dest``, with the value each takes when no
-#: position passed it. They are accepted twice: on the ``asl workbench`` group
-#: (whose bare form runs ``serve``) and on the ``serve`` leaf itself.
-_WORKBENCH_SERVE_DEFAULTS: dict[str, object] = {
-    "host": _WORKBENCH_DEFAULT_HOST,
-    "port": _WORKBENCH_DEFAULT_PORT,
-    "state_dir": None,
-    "plan_root": None,
-    "open": False,
-    "json": False,
-}
-_WORKBENCH_SERVE_FLAGS = {
-    "host": "--host",
-    "port": "--port",
-    "state_dir": "--state-dir",
-    "plan_root": "--plan-root",
-    "open": "--open",
-    "json": "--json",
-}
-# Each position parses into its own suppressed ``dest`` so neither one's
-# default can overwrite a value the other was given; parse_args merges them.
-_WORKBENCH_SERVE_CHILD_DESTS = {
-    name: f"_workbench_serve_{name}" for name in _WORKBENCH_SERVE_DEFAULTS
-}
-_WORKBENCH_GROUP_DESTS = {
-    name: f"_workbench_group_{name}" for name in _WORKBENCH_SERVE_DEFAULTS
-}
-
+from .cli_defaults import _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS
 
 #: The namespace type ``parse_args`` fills and returns, matching the overloads
 #: ``argparse.ArgumentParser.parse_args`` declares.
@@ -156,14 +123,6 @@ def non_blank_text(text: str) -> str:
     return text
 
 
-def port_number(text: str) -> int:
-    """``type=`` for a TCP port; 0 asks the kernel for an ephemeral one."""
-    value = _parse_int(text, PORT_NUMBER)
-    if not 0 <= value <= _MAX_PORT:
-        raise argparse.ArgumentTypeError(f"{PORT_NUMBER}; got {text!r}")
-    return value
-
-
 def int_in_range(low: int, high: int) -> Callable[[str], int]:
     """``type=`` for an integer in ``low..high`` inclusive, such as an hour."""
     requirement = f"must be an integer from {low} to {high}"
@@ -175,85 +134,6 @@ def int_in_range(low: int, high: int) -> Callable[[str], int]:
         return value
 
     return parse
-
-
-def _workbench_dest(name: str, *, child_parser: bool) -> str:
-    if child_parser:
-        return _WORKBENCH_SERVE_CHILD_DESTS[name]
-    return _WORKBENCH_GROUP_DESTS[name]
-
-
-_UNSET = object()
-
-
-def _pop_attr(args: argparse.Namespace, name: str) -> object:
-    value = getattr(args, name, _UNSET)
-    if value is not _UNSET:
-        delattr(args, name)
-    return value
-
-
-def _normalize_workbench_serve_args(args: argparse.Namespace) -> argparse.Namespace:
-    """Merge the group- and leaf-position serve flags into public dests.
-
-    Only bare ``asl workbench`` and ``asl workbench serve`` carry serve flags
-    this far; the subparsers action already refused them (or forwarded
-    ``--json``) for every other leaf.
-    """
-    if getattr(args, "command", None) != "workbench" or getattr(
-        args, "workbench_command", None
-    ) not in (None, "serve"):
-        return args
-
-    for name, default in _WORKBENCH_SERVE_DEFAULTS.items():
-        group_value = _pop_attr(args, _WORKBENCH_GROUP_DESTS[name])
-        child_value = _pop_attr(args, _WORKBENCH_SERVE_CHILD_DESTS[name])
-        if name == "plan_root":
-            roots: list[object] = []
-            for value in (group_value, child_value):
-                if isinstance(value, list):
-                    roots.extend(value)
-            setattr(args, name, roots or None)
-        elif child_value is not _UNSET:
-            setattr(args, name, child_value)
-        elif group_value is not _UNSET:
-            setattr(args, name, group_value)
-        else:
-            setattr(args, name, default)
-    return args
-
-
-#: ``asl workbench`` group parsers, whose serve flags only bare ``asl
-#: workbench`` and ``serve`` use; the subparsers action checks other leaves.
-_WORKBENCH_GROUP_PARSERS: weakref.WeakSet[argparse.ArgumentParser] = weakref.WeakSet()
-
-
-def _reconcile_workbench_group_flags(
-    parser: argparse.ArgumentParser,
-    leaf: argparse.ArgumentParser,
-    leaf_name: str,
-    namespace: argparse.Namespace,
-) -> None:
-    """Forward a group ``--json`` to a non-serve leaf; refuse the rest.
-
-    ``asl workbench --json registry`` means the same as ``asl workbench
-    registry --json``. The bind and browser flags mean nothing to a leaf other
-    than ``serve``, so passing them there is an error rather than a silent
-    no-op.
-    """
-    leaf_has_json = any(action.dest == "json" for action in leaf._actions)
-    if leaf_has_json and _pop_attr(namespace, _WORKBENCH_GROUP_DESTS["json"]) is True:
-        namespace.json = True
-    given = [
-        flag
-        for name, flag in _WORKBENCH_SERVE_FLAGS.items()
-        if hasattr(namespace, _WORKBENCH_GROUP_DESTS[name])
-    ]
-    if given:
-        parser.error(
-            f"{', '.join(given)} only apply to `asl workbench serve` (or bare "
-            f"`asl workbench`); pass `{leaf_name}` flags after `{leaf_name}`"
-        )
 
 
 if TYPE_CHECKING:
@@ -309,8 +189,6 @@ class _DescribedSubParsersAction(_SubParsersBase):
             chosen.error(f"unrecognized arguments: {' '.join(leftovers)}")
         if chosen in _PLAN_DIR_ALIAS_PARSERS:
             _reconcile_plan_dir_alias(chosen, namespace, "plan_dir")
-        if parser in _WORKBENCH_GROUP_PARSERS and values[0] != "serve":
-            _reconcile_workbench_group_flags(parser, chosen, values[0], namespace)
 
 
 _PLAN_DIR_POSITIONAL_DEST = "_plan_dir_positional"
@@ -452,7 +330,6 @@ class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
         # would reach the provenance record already exhausted.
         argv = None if args is None else list(args)
         parsed = super().parse_args(argv, namespace)
-        parsed = _normalize_workbench_serve_args(parsed)
         # Record the exact tokens that produced this namespace so lazy handler
         # dispatch (e.g. `runner.run_from_args`) can detect which flags were
         # passed explicitly without falling back to the process-global
@@ -461,65 +338,6 @@ class _AgentSessionLoopArgumentParser(argparse.ArgumentParser):
         if not hasattr(parsed, "_run_argv"):
             parsed._run_argv = list(sys.argv[1:] if argv is None else argv)
         return parsed
-
-
-def _add_workbench_serve_args(
-    parser: argparse.ArgumentParser, *, child_parser: bool = False
-) -> None:
-    if not child_parser:
-        _WORKBENCH_GROUP_PARSERS.add(parser)
-    parser.add_argument(
-        "--host",
-        dest=_workbench_dest("host", child_parser=child_parser),
-        default=argparse.SUPPRESS,
-        metavar="HOST",
-        help=(
-            "Loopback interface to bind; other addresses are refused "
-            f"(default: {_WORKBENCH_DEFAULT_HOST})"
-        ),
-    )
-    parser.add_argument(
-        "--port",
-        dest=_workbench_dest("port", child_parser=child_parser),
-        type=port_number,
-        default=argparse.SUPPRESS,
-        metavar="PORT",
-        help=(
-            f"TCP port to bind (default: {_WORKBENCH_DEFAULT_PORT}; "
-            "use 0 for an ephemeral port)"
-        ),
-    )
-    parser.add_argument(
-        "--state-dir",
-        dest=_workbench_dest("state_dir", child_parser=child_parser),
-        default=argparse.SUPPRESS,
-        metavar="DIR",
-        help="Override operational state directory",
-    )
-    parser.add_argument(
-        "--plan-root",
-        dest=_workbench_dest("plan_root", child_parser=child_parser),
-        action="append",
-        default=argparse.SUPPRESS,
-        metavar="DIR",
-        help=(
-            "Extra plan root directory to scan for discoverable plans (may be repeated)"
-        ),
-    )
-    parser.add_argument(
-        "--open",
-        dest=_workbench_dest("open", child_parser=child_parser),
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Open the Workbench URL in the default browser after binding",
-    )
-    parser.add_argument(
-        "--json",
-        dest=_workbench_dest("json", child_parser=child_parser),
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Print machine-readable JSON output for the startup record",
-    )
 
 
 def _add_plan_reference_args(parser: argparse.ArgumentParser) -> None:
@@ -587,31 +405,17 @@ def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
 
 # Nested groups list their leaves and nothing else, so an agent that reads
 # `asl outbox --help` sees no flags and concludes they do not exist. Every group
-# says where the flags actually live instead. `parent_form_leaf` names the leaf a
-# group's bare form runs when the group installs that leaf's flags on itself, so
-# the wording never denies flags the same help output displays.
+# says where the flags actually live instead.
 def _group_epilogue(
     group: str,
     leaf_example: str,
     *,
     guide: bool = False,
-    parent_form_leaf: str | None = None,
 ) -> str:
-    if parent_form_leaf is None:
-        lines = [
-            f"This help lists the `asl {group}` leaf commands only.",
-            f"Flags belong to a leaf, so read `{leaf_example}` for its flags.",
-        ]
-    else:
-        # Broken by hand: the groups use the raw formatter, which prints each
-        # line as written, so these stay inside 79 columns.
-        lines = [
-            f"This help lists the `asl {group}` leaf commands plus the flags the",
-            f"bare `asl {group}` form accepts.",
-            f"Bare `asl {group}` runs `{parent_form_leaf}` with those flags; every",
-            f"other leaf has its own, so read `{leaf_example}` or that",
-            "leaf's help.",
-        ]
+    lines = [
+        f"This help lists the `asl {group}` leaf commands only.",
+        f"Flags belong to a leaf, so read `{leaf_example}` for its flags.",
+    ]
     if guide:
         lines.append("Run `asl supervisor-guide` for the whole supervision workflow.")
     return "\n".join(lines)

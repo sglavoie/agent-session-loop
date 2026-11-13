@@ -23,12 +23,12 @@ from .review_continuation_models import (
 
 # Parsed review event logs, keyed by file identity rather than by spelling of
 # the path, so two spellings of the same log share one parse.  ``asl plans`` and
-# every Workbench ``/plans`` refresh reach this function hundreds of times for a
+# every bridge snapshot poll reach this function hundreds of times for a
 # few dozen distinct logs; parsing each one once per revision collapses that back
 # to a single pass.  The logs are append-only, so ``st_mtime_ns`` plus
 # ``st_size`` invalidates naturally when the runner writes during a live run.
 # One entry per file -- not per revision -- keeps the memo bounded for the
-# long-lived Workbench process.
+# long-lived bridge process.
 _REVIEW_EVENT_CACHE: dict[
     tuple[int, int], tuple[int, int, tuple[ReviewEventRecord, ...]]
 ] = {}

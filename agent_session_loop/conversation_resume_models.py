@@ -11,7 +11,7 @@ from . import conversations, events, harnesses, literals, workspaces
 
 #: The pause a turn raises when the saved conversation cannot be continued and
 #: no authorization was granted. Spelled through :mod:`events` so the runner,
-#: the pause policy, and the workbench all read one constant.
+#: the pause policy, and the recovery cards all read one constant.
 RECOVERY_PAUSE_REASON = events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED
 
 #: Selection states that stop the turn. Written as the complement of the two

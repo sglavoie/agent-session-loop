@@ -178,12 +178,12 @@ def enforce_body_bound(body: str) -> int:
     if size > MAX_QUESTION_BODY_BYTES:
         raise InterventionError(
             REASON_BODY_TOO_LARGE,
-            "question body exceeds the protocol body bound; open the Workbench "
-            "to read it",
+            "question body exceeds the protocol body bound; run "
+            f"`{QUESTION_BODY_FALLBACK} PLAN_DIR` to read it",
             details={
                 "body_bytes": size,
                 "max_body_bytes": MAX_QUESTION_BODY_BYTES,
-                "fallback": ACTION_WORKBENCH,
+                "fallback": QUESTION_BODY_FALLBACK,
             },
         )
     return size

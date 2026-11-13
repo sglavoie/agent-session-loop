@@ -4,9 +4,8 @@
 which is what finally reaches the per-turn `stdout.log`/`stderr.log` files that
 dominate the corpus: `compact-state` rewrites JSON records and never touches
 those logs, which is why compaction projects a rounding error against gigabytes
-of growth. Unlike the Workbench cleanup and archive views, which retire a whole
-plan a human selected, `gc` judges individual runs against an age cutoff and
-leaves their plan in place. With `PLAN_DIR` it sweeps one plan; with no
+of growth. `gc` judges individual runs against an age cutoff and leaves their
+plan in place. With `PLAN_DIR` it sweeps one plan; with no
 positional argument it judges every plan state directory under the resolved
 state root and reports reclaimable bytes per plan directory as well as in
 aggregate. A run is reclaimable only when its finish time can be read from its
@@ -34,11 +33,8 @@ no longer decide a retain question by removing the lock that answers it.
 is never an applied action either.
 `--json` emits the full per-plan projection, including every run's size and
 retain reason.
-A corpus-wide sweep also measures the Workbench archive under
-`<state_root>/archive/`, which `gc` never judges or deletes: the report (and the
-`archive` JSON object) states its entry count and bytes and how many entries are
-past the Workbench retention window, and points at the Workbench Archive view,
-the only place archive entries are purged.
+Only per-plan state directories are judged: a sibling directory under the
+state root, such as a legacy `archive/`, is neither judged nor deleted.
 
 `maintenance` is the scheduled counterpart to `gc`: the same reclaim, performed
 daily by a job ASL installs and owns, plus one additional lane `gc` does not

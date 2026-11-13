@@ -34,7 +34,7 @@ class ChildEnvTest(unittest.TestCase):
         self.assertEqual(env["FOO"], "bar")
 
     def test_an_inherited_origin_is_overridden(self) -> None:
-        with mock.patch.dict(os.environ, {"ASL_INVOCATION_ORIGIN": "workbench"}):
+        with mock.patch.dict(os.environ, {"ASL_INVOCATION_ORIGIN": "plan-launch"}):
             env = autopilot._child_env({})
         self.assertEqual(env["ASL_INVOCATION_ORIGIN"], "autopilot")
 

@@ -164,7 +164,7 @@ def _verify_remediation_fields(
 ) -> dict[str, Any]:
     """Attach a ``repair_hint`` (and ``no-contract`` ``skill_remediation``).
 
-    The hint mirrors ``workbench``'s runtime-recovery usage of
+    The hint mirrors the recovery cards' runtime-recovery usage of
     :func:`agent_session_loop.preflight_runtime_hints.runtime_repair_hint`; the
     import is deferred because ``preflight`` imports the verification modules.
     """

@@ -138,9 +138,9 @@ class CliInvocationMetricsTests(unittest.TestCase):
                 *self._pair(
                     "a",
                     hours_ago=3,
-                    command_path=["workbench", "serve"],
+                    command_path=["plans"],
                     harness="claude",
-                    origin=cli_trace.ORIGIN_WORKBENCH,
+                    origin=cli_trace.ORIGIN_PLAN_LAUNCH,
                 ),
                 *self._pair(
                     "b",
@@ -161,9 +161,7 @@ class CliInvocationMetricsTests(unittest.TestCase):
 
         section = self._collect()
 
-        self.assertEqual(
-            {"(root)": 1, "run": 1, "workbench serve": 1}, section["by_command"]
-        )
+        self.assertEqual({"(root)": 1, "run": 1, "plans": 1}, section["by_command"])
         self.assertEqual({cli_trace.HELP_LEAF: 1}, section["by_help_depth"])
         self.assertEqual({"0": 2, "3": 1}, section["by_exit_code"])
         self.assertEqual({"claude": 1, "unknown": 2}, section["by_harness"])
@@ -171,7 +169,7 @@ class CliInvocationMetricsTests(unittest.TestCase):
             {
                 cli_trace.ORIGIN_AUTOPILOT: 1,
                 cli_trace.ORIGIN_DIRECT: 1,
-                cli_trace.ORIGIN_WORKBENCH: 1,
+                cli_trace.ORIGIN_PLAN_LAUNCH: 1,
             },
             section["by_origin"],
         )

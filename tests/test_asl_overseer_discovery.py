@@ -40,7 +40,7 @@ from unittest import mock
 from agent_session_loop import bridge_protocol, events, overseer_discovery, state
 from tests.asl_overseer_discovery_support import _Corpus
 
-from .support import _WORKBENCH_DEAD_PID, write_plan
+from .support import _SUMMARY_DEAD_PID, write_plan
 
 ASL_TEST_PORTABLE = True
 
@@ -79,10 +79,12 @@ class BeyondTheBridgeLimitTests(unittest.TestCase):
 
         self.assertEqual([], slices, "the inventory truncates its candidate list")
 
-    def test_the_inventory_is_not_built_on_the_bridge_or_the_workbench(self) -> None:
+    def test_the_inventory_is_not_built_on_the_bridge_or_plan_summaries(
+        self,
+    ) -> None:
         """Full summaries are the read this boundary exists to avoid.
 
-        `workbench_summary.build_workbench_summary` opens turn records, last-message
+        `plan_summary.build_plan_summary` opens turn records, last-message
         files and review artifacts, and `bridge` is the module that bounds them
         for display. Importing either would put both back within reach of a
         boundary that runs before authorization.
@@ -105,7 +107,7 @@ class BeyondTheBridgeLimitTests(unittest.TestCase):
                 "bridge_protocol",
                 "bridge_server",
                 "bridge_session",
-                "workbench",
+                "plan_summary",
                 "runner",
             },
         )
@@ -144,7 +146,7 @@ class MetadataOnlyAccessTests(unittest.TestCase):
     ) -> None:
         corpus = _Corpus(self)
         plan_dir = corpus.write_run("plan-alpha")
-        # A real plan directory, complete with the artifacts a full workbench
+        # A real plan directory, complete with the artifacts a full plan
         # summary would read.
         write_plan(plan_dir, ("pending", "pending"))
         (plan_dir / "final-review.md").write_text("# Review\n", encoding="utf-8")
@@ -154,7 +156,7 @@ class MetadataOnlyAccessTests(unittest.TestCase):
         (run_dir / "result.json").write_text("{}", encoding="utf-8")
         (run_dir / "last-message.txt").write_text("secret", encoding="utf-8")
         (plan_state / events.EVENTS_FILE_NAME).write_text("{}\n", encoding="utf-8")
-        corpus.write_lock(plan_dir, pid=_WORKBENCH_DEAD_PID)
+        corpus.write_lock(plan_dir, pid=_SUMMARY_DEAD_PID)
 
         touched = sorted(set(self._paths_opened_under(corpus)))
 
@@ -169,7 +171,7 @@ class MetadataOnlyAccessTests(unittest.TestCase):
         corpus = _Corpus(self)
         plan_dir = corpus.write_run("plan-alpha")
         lock_path = corpus.write_lock(
-            plan_dir, pid=_WORKBENCH_DEAD_PID, hostname=socket.gethostname()
+            plan_dir, pid=_SUMMARY_DEAD_PID, hostname=socket.gethostname()
         )
 
         candidate = corpus.only()
@@ -185,7 +187,7 @@ class PortabilityTests(unittest.TestCase):
     def test_building_an_inventory_spawns_no_process(self) -> None:
         corpus = _Corpus(self)
         plan_dir = corpus.write_run("plan-alpha")
-        corpus.write_lock(plan_dir, pid=_WORKBENCH_DEAD_PID)
+        corpus.write_lock(plan_dir, pid=_SUMMARY_DEAD_PID)
 
         def refuse(*args: object, **kwargs: object) -> None:
             raise AssertionError("this boundary must not spawn a process")

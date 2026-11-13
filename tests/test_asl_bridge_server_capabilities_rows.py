@@ -18,10 +18,9 @@ from agent_session_loop import (
     intervention,
     mailbox,
     mailbox_appenders,
+    plan_pins_models,
+    plan_summary,
     state,
-    workbench_details,
-    workbench_registry_models,
-    workbench_summary,
 )
 
 from .asl_bridge_server_support import (
@@ -30,7 +29,7 @@ from .asl_bridge_server_support import (
     _Corpus,
 )
 from .support import (
-    _make_workbench_plan,
+    _make_summary_plan,
     _write_lock_file,
 )
 
@@ -54,7 +53,6 @@ class BridgeCapabilityTests(unittest.TestCase):
             intervention.ACTION_RESUME,
             intervention.ACTION_STOP_AFTER_CURRENT,
             intervention.ACTION_ABORT,
-            intervention.ACTION_WORKBENCH,
             "question.get",
             bridge_protocol.METHOD_HANDSHAKE,
         ):
@@ -110,16 +108,14 @@ class BridgeRowActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             waiting, _ = corpus.waiting_plan()
-            odd = _make_workbench_plan(corpus.plans_root, "plan-odd")
+            odd = _make_summary_plan(corpus.plans_root, "plan-odd")
             corpus.write_state(odd, {"run_id": 7, "harness": 3, "paused": True})
 
             snapshot = corpus.snapshot()
-            # The Workbench listing reads the same summary, so it is coerced
-            # there rather than only isolated in the bridge.
-            summary = workbench_summary.build_workbench_summary(
-                workbench_registry_models.DiscoveredPlan(
-                    plan_dir=odd, sources=("plan-root",)
-                ),
+            # `asl plans` reads the same summary, so it is coerced there
+            # rather than only isolated in the bridge.
+            summary = plan_summary.build_plan_summary(
+                plan_pins_models.DiscoveredPlan(plan_dir=odd, sources=("plan-root",)),
                 state_dir=corpus.state_root,
                 reclaim=False,
             )
@@ -222,7 +218,7 @@ class BridgeRowActionTests(unittest.TestCase):
             row = corpus.row_for(plan_dir)
 
             self.assertEqual(
-                [intervention.ACTION_RESUME, intervention.ACTION_WORKBENCH],
+                [intervention.ACTION_RESUME],
                 row["actions"],
             )
             self.assertEqual(
@@ -256,26 +252,18 @@ class BridgeRowActionTests(unittest.TestCase):
 
 
 class BridgeQuestionGetTests(unittest.TestCase):
-    def test_workbench_questions_include_an_in_turn_mailbox_wait(self) -> None:
+    def test_questions_include_an_in_turn_mailbox_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir, question_id = corpus.input_wait_plan()
 
-            result = workbench_details.read_questions(
-                plan_dir, state_dir=corpus.state_root
-            )
+            result = corpus.session().question_get({"plan_dir": str(plan_dir)})
 
             self.assertEqual("waiting", result["context_kind"])
             self.assertEqual(question_id, result["question_id"])
-            self.assertEqual(QUESTION_BODY, result["last_message"])
-            self.assertEqual(QUESTION_BODY, result["rendered_prompt"])
-            self.assertIn(intervention.ACTION_REPLY, result["actions"])
-            self.assertEqual(
-                intervention.action_token(
-                    intervention.inspect_run(plan_dir, state_dir=corpus.state_root)
-                ),
-                result["action_token"],
-            )
+            self.assertEqual(QUESTION_BODY, result["body"])
+            row = corpus.row_for(plan_dir)
+            self.assertIn(intervention.ACTION_REPLY, row["actions"])
 
     def test_live_question_body_is_returned_with_its_size(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -300,10 +288,10 @@ class BridgeQuestionGetTests(unittest.TestCase):
             self.assertEqual(QUESTION_BODY, result["body"])
             self.assertTrue(result["question_id"])
 
-    def test_oversize_body_is_refused_with_a_workbench_fallback(self) -> None:
+    def test_oversize_body_is_refused_with_a_cli_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
-            plan_dir = _make_workbench_plan(corpus.plans_root, "plan-huge")
+            plan_dir = _make_summary_plan(corpus.plans_root, "plan-huge")
             _write_lock_file(
                 plan_dir,
                 corpus.state_root,
@@ -329,7 +317,8 @@ class BridgeQuestionGetTests(unittest.TestCase):
 
             self.assertEqual(intervention.REASON_BODY_TOO_LARGE, caught.exception.code)
             self.assertEqual(
-                intervention.ACTION_WORKBENCH, caught.exception.details["fallback"]
+                intervention.QUESTION_BODY_FALLBACK,
+                caught.exception.details["fallback"],
             )
 
     def test_unknown_question_is_refused_without_a_body(self) -> None:

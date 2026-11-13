@@ -53,9 +53,8 @@ class LiveContractDocsTests(unittest.TestCase):
         normalized = " ".join(docs.split())
 
         for marker in (
-            "`agent_session_loop.workbench_actions.perform` is the single "
-            "application operation behind `POST /api/launch`, `POST /api/reply`, "
-            "`POST /api/question-reply`, and the bridge's `run.resume` and "
+            "`agent_session_loop.run_actions.perform` is the single "
+            "application operation behind the bridge's `run.resume` and "
             "`question.reply`",
             "A stale target is refused with or without an action token.",
             "a target that has moved is refused before admission, so the "
@@ -69,7 +68,7 @@ class LiveContractDocsTests(unittest.TestCase):
             "matching it against the id the operation named",
             "A guard refusal closes the row `cancelled` on the way past",
             "A launched run gets its own session.",
-            "`workbench_launch.launch_plan` passes `start_new_session=True`, matching "
+            "`plan_launch.launch_plan` passes `start_new_session=True`, matching "
             "the `AbandonProcessGroup` the launchd agents already set",
         ):
             self.assertIn(
@@ -248,7 +247,7 @@ class LiveContractDocsTests(unittest.TestCase):
         ].split("\n## ", 1)[0]
         surface_docs = mailbox_docs.split(
             "### Surface and observability accounting", 1
-        )[1].split("\n\nWorkbench", 1)[0]
+        )[1].split("\n\nASL intentionally has no HTTP surface", 1)[0]
         event_reference_docs = docs.split("`events.jsonl` records", 1)[1].split(
             "Verification heartbeats", 1
         )[0]
@@ -327,7 +326,7 @@ class LiveContractDocsTests(unittest.TestCase):
             "30-minute ceiling bounds unsupervised time rather\nthan wall clock",
             "`asl control set-model",
             "no runner/supervisor thread",
-            "no Workbench",
+            "no HTTP mailbox-authoring",
         ):
             self.assertIn(marker, guide)
         for marker in (
@@ -365,9 +364,6 @@ class SupervisionBridgeDocsTests(unittest.TestCase):
         )
 
         for marker in (
-            # workbench.ensure hands out an owner token, so it is gated.
-            "refused with the same `contract-set-mismatch` an unhandshaken "
-            "mutation gets until a handshake has matched the contract set",
             # A reused operation id is a conflict, not a replay.
             '`details.reason: "redirect-replay-conflict"`, the same refusal '
             "`run.redirect` gives",

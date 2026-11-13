@@ -2,11 +2,10 @@
 
 `asl bridge serve --stdio --protocol 2` streams ASL's active-run
 projection to an external supervision client over stdin/stdout and
-accepts the intervention set an operator can already reach from the CLI
-and the Workbench: reply, resolve, resume, stop-after-current, abort,
-and a Workbench deep link. Every one of those goes through the same
-`agent_session_loop.intervention` service layer the other two surfaces
-use, so a rule can never hold on one surface and not another. Protocol 2
+accepts the intervention set an operator can already reach from the CLI:
+reply, resolve, resume, stop-after-current, abort, and redirect. Every one of
+those goes through the same `agent_session_loop.intervention` service layer
+the CLI uses, so a rule can never hold on one surface and not another. Protocol 2
 is the only supported version; requesting another — including the retired
 protocol 1 — exits 2 with a stderr diagnostic and serves nothing.
 
@@ -31,9 +30,7 @@ build-time disagreement, and there is no protocol-1 parser left to fall
 back to. The refusal message is a fixed string rather than an
 interpolation of whatever the client sent, because a compatibility reason
 reaches an operator's screen verbatim. Reads survive a mismatch, so a
-stale cockpit can still render what it has and explain itself. The one
-exception is `workbench.ensure`, whose answer is mutation capability
-rather than state (see Hello below).
+stale cockpit can still render what it has and explain itself.
 
 A handshake against a projection that has since moved is answered rather
 than refused: `mutations_enabled` is false and the response names the
@@ -62,8 +59,8 @@ to that list is gated by construction.
  "contract_set_id":"asl-amx-1.<16 hex>",
  "capabilities":["session.handshake","runs.snapshot","question.get",
    "question.reply","question.resolve","run.resume",
-   "run.stop_after_current","run.abort","workbench.ensure",
-   "run.redirect","run.redirect_status","run.recover_conversation"],
+   "run.stop_after_current","run.abort","run.redirect",
+   "run.redirect_status","run.recover_conversation"],
  "events":["runs.changed","operation.updated"],
  "mutation_methods":["question.reply","question.resolve","run.resume",
    "run.stop_after_current","run.abort","run.redirect"],
@@ -76,12 +73,7 @@ never by position or list length. The list is derived from the registered
 method handlers and event names rather than written by hand, so a name
 cannot be advertised before something stands behind it. `mutation_methods`
 is a subset of `capabilities` in the same order; a capability absent from
-it is a read, and reads never need a current snapshot. One read is still
-gated: `workbench.ensure` writes nothing, but it hands out an owner
-Workbench token whose routes can mutate, so it is refused with the same
-`contract-set-mismatch` an unhandshaken mutation gets until a handshake
-has matched the contract set. It does not need `mutations_enabled`, so a
-handshake against a moved projection still opens it.
+it is a read, and reads never need a current snapshot.
 
 ### Requests and responses
 
@@ -112,10 +104,9 @@ Error codes are a closed set — branch on `code`, not on `message`:
 | `frame-too-large` | Inbound line exceeded `max_frame_bytes`. | no |
 | `internal-error` | Projection raised, or a handler failed unexpectedly. | yes |
 | `mutation-failed` | A durable write or spawn failed. Nothing was applied. | yes |
-| `workbench-unavailable` | The bridge could not start a Workbench server. | yes |
 
 Mutations add the service layer's own refusal reasons, shared verbatim
-with the CLI and the Workbench so a client sees one vocabulary:
+with the CLI so a client sees one vocabulary:
 
 | Code | Meaning | `retryable` |
 | --- | --- | --- |
@@ -128,7 +119,7 @@ with the CLI and the Workbench so a client sees one vocabulary:
 | `no-open-question` | No question is waiting for a reply. | no |
 | `question-mismatch` | `params.question_id` is not open on this plan. | no |
 | `empty-text` | Reply text was blank or whitespace. | no |
-| `question-body-too-large` | Body exceeds 256 KiB. `details.fallback` names `workbench.ensure`. | no |
+| `question-body-too-large` | Body exceeds 256 KiB. `details.fallback` names `asl questions`. | no |
 | `missing-question-body` | The selected question carries no readable text. | yes |
 | `invalid-plan` | The plan directory could not be canonicalized. | no |
 
@@ -152,7 +143,7 @@ Returns the deterministic projection of every active or actionable plan:
    "staleness_bound_seconds":20.0,"failed_projections":0}}
 ```
 
-Rows cover only these primary states, in Workbench urgency order:
+Rows cover only these primary states, in plan-summary urgency order:
 `paused-for-reply`, `failed`, `stale`, `invalid`, `verifying`,
 `running`. Healthy `ready`, `recent`, and `complete` plans are never
 present. Each row carries `row_id` (a stable hash of `plan_dir` and
@@ -165,8 +156,7 @@ timestamps, `pause_reason`, `question`, `actions`, `disabled_reasons`,
 
 `actions` lists exactly what this run permits right now, drawn from
 `question.reply`, `question.resolve`, `run.resume`,
-`run.stop_after_current`, `run.abort`, `workbench.ensure`, and
-`run.redirect`.
+`run.stop_after_current`, `run.abort`, and `run.redirect`.
 `disabled_reasons` explains, per unavailable action, why. `action_token`
 fingerprints the plan identity together with the run, question, and
 permitted-action state the row was built from; a mutation must return it.
@@ -275,9 +265,9 @@ result carries `question_id`, `context_kind` (`waiting` or `pause`),
 `body`, `body_bytes`, and a fresh `action_token`.
 
 Bodies are bounded at 256 KiB. A larger one is refused with
-`question-body-too-large` and `details.fallback` naming
-`workbench.ensure`, because the Workbench already streams artifacts of
-any size and a truncated question is worse than an explicit redirect.
+`question-body-too-large` and `details.fallback` naming `asl questions`,
+the CLI command that prints the whole question, because a truncated
+question is worse than an explicit redirect.
 
 ### Mutating methods
 
@@ -355,26 +345,6 @@ drops already-settled operations, so a burst of requests cannot evict an
 in-flight resume and let it spawn twice; anything unsettled leaves only
 through the TTL. It is a receipt window, not a journal: a long-lived
 bridge never accumulates operator history.
-
-### `workbench.ensure`
-
-Takes `plan_dir` and an optional `focus` (`reply`, `verification`,
-`active`, or `events`) and returns a deep link. It requires a handshake
-that matched the contract set — the link's token is the Workbench owner
-token, which passes its unlock and launch routes — and is refused
-`contract-set-mismatch` before one, exactly as a mutation would be:
-
-```json
-{"plan_dir":"/plans/alpha","row_id":"<hex>","focus":"reply",
- "url":"http://127.0.0.1:53311/?token=...#plan?dir=%2Fplans%2Falpha&focus=reply"}
-```
-
-The first call lazily starts one Workbench server bound to `127.0.0.1`
-on an ephemeral port with a freshly generated token; later calls reuse
-it, and it is shut down with the bridge. The token rides in the query
-string because a fragment is never sent to the server, and the plan
-selection rides in the fragment because the Workbench front end routes on
-it.
 
 ### `run.redirect`
 

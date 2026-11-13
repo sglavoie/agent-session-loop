@@ -13,12 +13,12 @@ from typing import TYPE_CHECKING
 
 from agent_session_loop import (
     cli,
+    plans_cli,
     plans_content_hash,
     plans_files,
     plans_models,
     plans_readiness,
     state,
-    workbench_cli,
 )
 from tests.support import (
     patched_env,
@@ -66,7 +66,7 @@ class JsonCliHelpers(_Base):
         args = cli.build_parser(prog="asl").parse_args(["plans", *argv])
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            code = workbench_cli.plans_from_args(args, now=now)
+            code = plans_cli.plans_from_args(args, now=now)
         return code, stdout.getvalue(), stderr.getvalue()
 
     def _stale_days_verdict(

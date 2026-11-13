@@ -12,8 +12,8 @@ from agent_session_loop import (
     intervention,
     overseer_resume,
     overseer_resume_ownership,
+    plan_launch,
     supervision_liveness,
-    workbench_launch,
 )
 from tests import support_asl_overseer_resume as fixtures
 from tests.support import (
@@ -351,8 +351,8 @@ class NoInventedReply(fixtures._ResumeCase):
             captured.append(process)
             return process
 
-        with self.assertRaises(workbench_launch.LaunchError):
-            workbench_launch.launch_plan(
+        with self.assertRaises(plan_launch.LaunchError):
+            plan_launch.launch_plan(
                 self.launchable_plan(),
                 reply_text="   \n ",
                 popen_factory=factory,
@@ -369,7 +369,7 @@ class NoInventedReply(fixtures._ResumeCase):
             return process
 
         reply = "the answer is option B"
-        result = workbench_launch.launch_plan(
+        result = plan_launch.launch_plan(
             self.launchable_plan(),
             reply_text=reply,
             popen_factory=factory,

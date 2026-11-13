@@ -45,7 +45,7 @@ def run_from_args(
     """Run one or more pending sessions from CLI arguments.
 
     The package's public entry point, reached by ``cli.py`` through the string
-    ``handler_ref="runner:run_from_args"``, its only caller: the Workbench and
+    ``handler_ref="runner:run_from_args"``, its only caller: ``plan_launch`` and
     the autopilot start a run as an ``asl run`` child process. The admission
     sequence and the resume overlay live in
     :mod:`agent_session_loop.run_entry`; this shim supplies the one collaborator

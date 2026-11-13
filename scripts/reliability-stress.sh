@@ -68,9 +68,6 @@ fault_scenarios=(
     tests.test_asl_redirect_control_live.LiveWorkerTerminationTests
     tests.test_asl_redirect_continuation_journal.SerializationTests
     tests.test_asl_redirect_continuation_settle.SettleRedirectedTurnTests
-    tests.test_workbench_remote_actions_restart.RestartSettlementTests
-    tests.test_workbench_remote_actions_restart.RestartTests
-    tests.test_workbench_remote_actions_lane.LostResponseTests
     tests.test_asl_control_mailbox_cli_supervise.MailboxCliTestsPart8.test_overlapping_cursor_writers_cannot_regress_the_saved_sequence
     tests.asl_tail_cases_recovery.TailFollowerRecoveryTests.test_active_replay_restarts_on_changed_replacement
     tests.asl_tail_cases_recovery.TailFollowerRecoveryTests.test_recent_replay_follows_a_line_appended_after_its_read

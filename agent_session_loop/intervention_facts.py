@@ -3,9 +3,9 @@
 
 Replying to a live question, closing one answerlessly, stopping a run after the
 current session, aborting an in-flight turn, and resuming a paused run are all
-reachable from at least three surfaces: the CLI, the Workbench HTTP API, and now
-the stdio bridge. Each rule that decides whether an intervention is legal lives
-here exactly once so those surfaces cannot drift apart.
+reachable from two surfaces: the CLI and the stdio bridge. Each rule that
+decides whether an intervention is legal lives here exactly once so those
+surfaces cannot drift apart.
 
 Three properties are structural rather than incidental:
 
@@ -54,7 +54,6 @@ ACTION_RESOLVE = "question.resolve"
 ACTION_RESUME = "run.resume"
 ACTION_STOP_AFTER_CURRENT = "run.stop_after_current"
 ACTION_ABORT = "run.abort"
-ACTION_WORKBENCH = "workbench.ensure"
 ACTION_REDIRECT = "run.redirect"
 #: Appended to, never reordered. A caller compares the ``actions`` list it was
 #: shown against the one it holds, and the action token fingerprints this exact
@@ -66,7 +65,6 @@ ACTIONS: tuple[str, ...] = (
     ACTION_RESUME,
     ACTION_STOP_AFTER_CURRENT,
     ACTION_ABORT,
-    ACTION_WORKBENCH,
     ACTION_REDIRECT,
 )
 
@@ -85,7 +83,8 @@ REASON_MISSING_QUESTION_BODY = "missing-question-body"
 REASON_UNKNOWN_PROFILE_FIELD = "unknown-profile-field"
 
 # A body a client cannot render is worse than an explicit refusal that names the
-# surface which can: the Workbench already streams arbitrarily large artifacts.
+# surface which can: `asl questions` prints the whole paused question.
+QUESTION_BODY_FALLBACK = "asl questions"
 MAX_QUESTION_BODY_BYTES = 256 * 1024
 
 DISABLED_NO_ACTIVE_RUN = "no active run holds this plan"

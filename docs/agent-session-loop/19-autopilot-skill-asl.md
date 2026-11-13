@@ -35,20 +35,13 @@ or ambiguous leaves `selected_harness` null and offers every supported harness
 candidate rather than failing. The command is registered through the lazy
 `handler_ref` mechanism, so importing or building `cli.py` never loads it.
 
-Every nested command group — `bridge`, `workbench`, `control`, `inbox`,
+Every nested command group — `bridge`, `control`, `inbox`,
 `outbox`, `assurance`, `diagnostics`, `maintenance`, `agent-mux`, `overseer`,
 and the nested `control guard` — carries an epilogue, because a leaf-only group's
 help lists its leaves and none of their flags, which reads to an agent like the
 flags do not exist. Those groups say that they list leaves only and name the
 leaf help to read instead, such as `asl outbox supervise --help`; the
 supervision groups also point at `asl supervisor-guide`.
-
-`asl workbench` is the exception: it installs the serve flags on the parent
-parser and the bare `asl workbench` form runs `asl workbench serve` with them,
-so its help legitimately shows `--host`, `--port`, `--state-dir`,
-`--plan-root`, `--open`, and `--json` alongside the leaves. Its epilogue says
-so — bare `asl workbench` runs `asl workbench serve` with those flags, and
-every other leaf has its own — instead of claiming the group lists leaves only.
 
 ### Install and sync
 

@@ -31,7 +31,7 @@ from .bridge_protocol import (
     _bounded_path,
     _bounded_text,
 )
-from .bridge_workers import ProjectionPending, WorkbenchLifecycle, projection_cadence
+from .bridge_workers import ProjectionPending, projection_cadence
 
 
 @dataclass
@@ -102,7 +102,6 @@ class SessionState:
 
     snapshot_builder: Callable[[], dict[str, Any]]
     state_dir: str | Path | None = None
-    workbench_lifecycle: WorkbenchLifecycle | None = None
     clock: Callable[[], float] = time.monotonic
     poll_interval: float = POLL_INTERVAL_SECONDS
     projection_retry_interval: float = PROJECTION_RETRY_INTERVAL_SECONDS

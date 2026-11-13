@@ -67,19 +67,6 @@ test-live-review harness="codex" reviewer="claude" *ARGS:
 test-live-recovery harness="codex" *ARGS:
     python3 -m tests.asl_live_redirect_acceptance --suite recovery --harness {{harness}} {{ARGS}}
 
-# Development-only: the harness lives in tests/workbench_browser and is no
-# dependency of either Workbench deployment. Needs Node and npm; the first run
-# installs the pinned Playwright and its Chromium and WebKit engines. npm ci
-# runs again whenever package-lock.json is newer than the installed tree's own
-# record of it, so a lockfile bump (a Dependabot pin move, say) is installed
-# rather than tested against the old pin.
-[doc("Run the Workbench browser tests (Playwright; needs Node and npm)")]
-[working-directory("tests/workbench_browser")]
-test-browser:
-    if [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then npm ci; fi
-    npm run test:install
-    npm test
-
 # Reliability stress gate. Repeats the load- and calendar-sensitive scenarios
 # in isolation, then sweeps the date-sensitive ones across timezones, then
 # repeats them again as concurrent shards while the full suite loads the

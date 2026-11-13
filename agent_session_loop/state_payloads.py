@@ -192,7 +192,7 @@ def _runner_state_payload(
     except FileNotFoundError:
         # The file vanished between ``exists()`` and ``read_text()``; treat
         # it as absent rather than malformed so concurrent runner cleanup
-        # does not surface a 500 to the Workbench UI.
+        # does not surface as an error to a status reader.
         return {
             "present": False,
             "path": str(state_path),

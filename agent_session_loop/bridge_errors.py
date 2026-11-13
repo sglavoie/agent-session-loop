@@ -9,9 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from asl_workbench import controls as control_rules
-
-from . import intervention, workbench_controls
+from . import control_rules, control_service, intervention
 from .bridge_protocol import (
     ERROR_CODES,
     ERROR_INTERNAL,
@@ -40,8 +38,8 @@ def _control_details(details: Mapping[str, Any]) -> dict[str, Any]:
 
     Numbers travel as text because a client renders these rather than computing
     with them, and because the shared service states a bound once for every
-    caller: a ceiling reads the same here as it does in a browser, where a raw
-    float and a string of one would not.
+    caller: a ceiling reads the same here as it does in any other client, where
+    a raw float and a string of one would not.
     """
     bounded: dict[str, Any] = {}
     for key, value in details.items():
@@ -53,7 +51,7 @@ def _control_details(details: Mapping[str, Any]) -> dict[str, Any]:
     return bounded
 
 
-def _control_error(error: workbench_controls.ControlRefused) -> BridgeError:
+def _control_error(error: control_service.ControlRefused) -> BridgeError:
     """Re-raise a shared control refusal in the protocol's own vocabulary.
 
     The service refuses in terms of what a client should *do* -- rewrite the
@@ -63,13 +61,13 @@ def _control_error(error: workbench_controls.ControlRefused) -> BridgeError:
     for travels in ``details.reason``, so a client keeps the specific answer
     without this surface widening a versioned contract to carry it.
     """
-    if isinstance(error, workbench_controls.ControlQueueRefused):
+    if isinstance(error, control_service.ControlQueueRefused):
         return BridgeError(
             ERROR_MUTATION_FAILED,
             f"control command could not be queued: {error.queue_error}",
             retryable=True,
         )
-    if isinstance(error, workbench_controls.RedirectSubmitFailed):
+    if isinstance(error, control_service.RedirectSubmitFailed):
         # Split on which layer refused rather than on whether the body was at
         # fault: "submitted" and "persisted" are this protocol's two sentences
         # for a correction that did not land, and admission is the only layer

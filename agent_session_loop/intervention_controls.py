@@ -157,9 +157,9 @@ def resume_paused_run(
     downgrades to this process's defaults. The reply reaches the child through
     stdin and therefore never appears in argv.
     """
-    from . import workbench_launch
+    from . import plan_launch
 
-    return workbench_launch.launch_plan(
+    return plan_launch.launch_plan(
         plan_dir,
         profile=profile,
         reply_text=reply_text,
@@ -208,12 +208,10 @@ def resume_recovered_run(
     launcher's own reason, so a caller behind this seam handles one error type
     and never needs the launcher in its own imports.
     """
-    from . import workbench_launch, workbench_registry_models
+    from . import plan_launch, plan_pins_models
 
     values = dict(profile_fields or {})
-    known = {
-        declared.name for declared in fields(workbench_registry_models.LaunchProfile)
-    }
+    known = {declared.name for declared in fields(plan_pins_models.LaunchProfile)}
     unknown = sorted(set(values) - known)
     if unknown:
         raise InterventionError(
@@ -222,14 +220,14 @@ def resume_recovered_run(
             details={"fields": unknown},
         )
     try:
-        return workbench_launch.launch_plan(
+        return plan_launch.launch_plan(
             plan_dir,
-            profile=workbench_registry_models.LaunchProfile(**values),
+            profile=plan_pins_models.LaunchProfile(**values),
             reply_text=None,
             state_dir=state_dir,
             resume=True,
             isolate_locks=True,
             **launch_kwargs,
         )
-    except workbench_launch.LaunchError as error:
+    except plan_launch.LaunchError as error:
         raise InterventionError(error.reason, error.message) from error

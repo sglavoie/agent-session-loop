@@ -24,7 +24,7 @@ Five properties are structural rather than incidental:
   through ``question.get`` and never rides along with a projection.
 - **Every mutation goes through the shared service layer.** The handlers below
   own request parsing and the operation model; :mod:`.intervention` owns what is
-  legal, so the bridge cannot drift from the CLI or the Workbench HTTP API.
+  legal, so the bridge cannot drift from the CLI.
 - **Reply text never becomes protocol or diagnostic state.** It is passed
   straight to ASL's own durable records and is absent from every response,
   event, operation receipt, and stderr line the bridge can emit.
@@ -42,16 +42,15 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from asl_workbench import controls as control_rules
-
 from . import (
     clock,
+    control_rules,
     intervention,
+    plan_summary_model,
     redirect_admission,
     redirect_cli,
     redirect_recovery,
     redirect_store_vocab,
-    workbench_summary_model,
 )
 
 PROTOCOL_VERSION = 2
@@ -70,13 +69,6 @@ POLL_INTERVAL_SECONDS = 1.0
 # deadline of its own the loop selects with timeout zero and retries the same
 # failing walk immediately, burning a core instead of waiting.
 PROJECTION_RETRY_INTERVAL_SECONDS = 1.0
-
-
-# How often the Workbench listener checks whether it has been asked to stop.
-# It is well below the client's shutdown grace because the client terminates a
-# bridge that has not exited by then, and the default half second is long
-# enough to turn every clean exit into a kill.
-WORKBENCH_POLL_INTERVAL_SECONDS = 0.02
 
 
 # How long a stopping bridge waits for an in-flight projection to notice. A
@@ -115,7 +107,6 @@ _METHOD_ORDER: tuple[str, ...] = (
     "run.resume",
     "run.stop_after_current",
     "run.abort",
-    "workbench.ensure",
     "run.redirect",
     METHOD_REDIRECT_STATUS,
     METHOD_RECOVER_CONVERSATION,
@@ -125,7 +116,7 @@ _METHOD_ORDER: tuple[str, ...] = (
 # The methods that change ASL state. Each one is refused until a handshake has
 # matched the contract set against a snapshot digest the bridge still holds.
 #
-# ``run.redirect`` is here and its two companions are not, and the split is the
+# ``run.redirect`` is here and its two sibling reads are not, and the split is the
 # point: submitting a correction appends to the redirect journal, while reading
 # where a correction got to and reading which recovery a pause is waiting on
 # both write nothing. A read that a stale client can still make is what lets an
@@ -140,16 +131,6 @@ MUTATION_METHODS: tuple[str, ...] = (
 )
 
 
-# Reads that hand out capability rather than state. ``workbench.ensure`` writes
-# nothing, so it stays out of ``MUTATION_METHODS`` and needs no current
-# snapshot, but its answer is a tokenized owner URL whose token passes the
-# Workbench's own mutating routes. Serving that before a handshake has matched
-# the contract set would let any client skip the gate by asking for the link,
-# so these methods require a contract-matched handshake and are refused the way
-# an unhandshaken mutation is.
-CAPABILITY_METHODS: tuple[str, ...] = ("workbench.ensure",)
-
-
 EVENT_RUNS_CHANGED = "runs.changed"
 
 
@@ -160,8 +141,8 @@ EVENT_NAMES: tuple[str, ...] = (EVENT_RUNS_CHANGED, EVENT_OPERATION_UPDATED)
 
 
 # Rich discovery is the intervention queue, not the plan list: healthy
-# ``ready``, ``recent``, and ``complete`` plans stay in Plans and Workbench.
-ACTIVE_PRIMARY_STATES: tuple[workbench_summary_model.PrimaryState, ...] = (
+# ``ready``, ``recent``, and ``complete`` plans stay in ``asl plans``.
+ACTIVE_PRIMARY_STATES: tuple[plan_summary_model.PrimaryState, ...] = (
     "paused-for-reply",
     "failed",
     "stale",
@@ -177,7 +158,7 @@ Phase = str
 PHASE_AWAITING_REPLY = "awaiting-reply"
 
 
-PHASE_BY_STATE: dict[workbench_summary_model.PrimaryState, Phase] = {
+PHASE_BY_STATE: dict[plan_summary_model.PrimaryState, Phase] = {
     "paused-for-reply": PHASE_AWAITING_REPLY,
     "failed": "failed",
     "stale": "stale",
@@ -227,9 +208,6 @@ ERROR_INTERNAL = "internal-error"
 ERROR_MUTATION_FAILED = "mutation-failed"
 
 
-ERROR_WORKBENCH_UNAVAILABLE = "workbench-unavailable"
-
-
 # Protocol 2 appends exactly two codes and removes none, so a client that
 # understands the protocol-1 vocabulary still understands every refusal it
 # shares with protocol 2.
@@ -253,7 +231,6 @@ ERROR_CODES: tuple[str, ...] = (
     ERROR_FRAME_TOO_LARGE,
     ERROR_INTERNAL,
     ERROR_MUTATION_FAILED,
-    ERROR_WORKBENCH_UNAVAILABLE,
     # Refusal reasons the service layer owns. They are listed here so a client
     # sees one error vocabulary rather than two.
     intervention.REASON_INVALID_PLAN,
@@ -362,28 +339,6 @@ REDIRECT_REASONS: tuple[str, ...] = tuple(
 # restated: two surfaces with two windows would disagree about which
 # corrections exist.
 MAX_REDIRECT_OPERATIONS = control_rules.MAX_REDIRECT_OPERATIONS
-
-
-# Deep-link focus keys the Workbench front end recognizes. A request may name
-# any of them; the default lands on the panel the operator is about to act in.
-WORKBENCH_FOCUS_REPLY = "reply"
-
-
-WORKBENCH_FOCUS_VERIFICATION = "verification"
-
-
-WORKBENCH_FOCUS_ACTIVE = "active"
-
-
-WORKBENCH_FOCUS_EVENTS = "events"
-
-
-WORKBENCH_FOCUS_VALUES: tuple[str, ...] = (
-    WORKBENCH_FOCUS_REPLY,
-    WORKBENCH_FOCUS_VERIFICATION,
-    WORKBENCH_FOCUS_ACTIVE,
-    WORKBENCH_FOCUS_EVENTS,
-)
 
 
 # Per-field bounds run first so a single corrupt plan cannot consume the whole

@@ -73,7 +73,7 @@ OWNER_GONE: OwnerLiveness = "gone"
 OWNER_UNKNOWN: OwnerLiveness = "unknown"
 
 #: Reasons :func:`reconcile_startup` declines to touch the journal. Stable
-#: strings: the run loop puts them in an event and the workbench reads them.
+#: strings: the run loop puts them in an event that other readers parse.
 BLOCKED_FOREIGN_OWNER = "foreign-lock-owner"
 BLOCKED_LIVE_OWNER = "live-lock-owner"
 BLOCKED_JOURNAL_UNREADABLE = "redirect-journal-unreadable"

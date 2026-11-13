@@ -7,24 +7,6 @@ because the npm loader can update its package without changing its own file
 identity. Read-only tools, denied write/shell/URL tools, and the other audit
 restrictions apply to both forms.
 
-Remote detail paging retains the selected run, question selector, and requested
-page bounds, including when paging from a cached answer. A new run starting
-between pages cannot redirect the remaining event history to that new run.
-Replies received at or after a read's deadline settle as a timeout without
-caching their bodies, even when the periodic expiry sweep has not run yet.
-When a queued read leaves the service, its outgoing deadline is renewed along
-with the client's wait, so the connector uses the same response window. Reads
-whose queue deadline has passed are still discarded. A read cancelled after
-dequeue is skipped before dispatch, leaving that upload free to carry the next
-live request.
-Read settlement publishes its answer atomically with removing the pending
-request. A browser wait ending during an upload, expiry sweep, or disconnect
-receives that outcome instead of an internal error and an uncollected answer.
-Simultaneous uploads establish one link generation, preserving reads queued
-as the connector reconnects.
-Silence checks compare a monotonic sample with the latest upload while holding
-the upload lock, and clear the old carry queue in the same decision. An upload
-arriving during a sweep keeps the link and its new requests live.
 
 `asl outbox supervise` recovers its launch's terminal record even after the
 persisted cursor has advanced past it. If output is interrupted after saving
@@ -42,10 +24,10 @@ packet construction live in `turn_preparation_*`.
 `redirect_control` preserves its public controller and records. The controller
 handles acceptance and phase transitions; its `UrgentEscalation` base owns the
 shared turn state, watchdog, termination evidence, and successor gate.
-`workbench_operation_*` separates journal storage, evidence collection, and
-mutation admission. The portable `asl_workbench.catalog_*` modules separate
-vocabularies, safe labels, records, and paginated views. These public modules
-use explicit imports to preserve existing callers.
+`operation_store`, `operation_journal`, `operation_evidence`, and
+`operation_mutations` separate the store's entry points, journal storage,
+evidence collection, and mutation admission. These public modules use explicit
+imports to preserve existing callers.
 
 Operation-journal compaction publishes an owner-only `operations.jsonl.compact`
 recovery file before truncating `operations.jsonl`. Readers use that replacement
@@ -56,18 +38,9 @@ cross-process admission ordering. Torn-tail separators count toward the journal'
 byte limit before an append is admitted.
 
 Operation-journal replay skips JSON that exceeds the decoder's nesting limit,
-just as it skips torn lines, preserving usable records and later writes. Remote
-corrections that return without persisting are rejected inside the journal's
-settlement context, so their retries report rejection and later corrections are
-not blocked. Remote admission refusals retain the journal's reason and message,
-including conflicting reuse of an operation id and uncertain prior outcomes.
-
-Remote operation reports recheck transitions when another upload or recovery
-sweep advances the journal concurrently. Refusal receipts only settle rows that
-are still dispatched, belong to the uploading connector, and match the
-submission request id; operation reports also require that ownership.
-Undelivered copies only expire rows that are still pending. A stale status read
-cannot overwrite newer evidence or turn a late report into an upload failure.
+just as it skips torn lines, preserving usable records and later writes.
+Admission refusals retain the journal's reason and message, including
+conflicting reuse of an operation id and uncertain prior outcomes.
 
 Local reply settlement also preserves a consumption receipt when a reconciliation
 sweep observes the worker reading the reply before the delivery call returns.
@@ -82,13 +55,6 @@ or submitting an unrelated action preserves the uncertain record so late
 evidence can still settle it. Launch and resume share the run-start scope and
 can replace one another when the plan is idle and the prior owner is gone.
 
-The Workbench connector collects each completed observation, detail answer, or
-mutation report before starting another worker in that lane. A worker finishing
-between collection and scheduling cannot have its result overwritten. Passive
-settlement checks rotate through accepted operations, so missing evidence or a
-failed check for one operation does not prevent later operations from reporting
-consumption.
-
 The public imports for commit messages, conversation continuity, AgentMux
 contracts, and overseer decisions, context, and CLI commands remain in their
 original modules. Their implementations live in focused sibling modules:
@@ -98,8 +64,7 @@ validation, capabilities, storage, selection, and relocation;
 `agent_mux_contract_*` separates schema linting, validation, manifests, and
 corpus checks. The `overseer_decision_*`, `overseer_context_*`, and
 `overseer_cli_*` families separate evidence, models, policy, and command paths.
-Workbench uses the same structure for `history_*`, `http_*`, `capabilities_*`,
-and `lifecycle_*`. Internal calls use the owning modules; tests patch those
+Internal calls use the owning modules; tests patch those
 owners when substituting collaborators. Shared test fixtures live in dedicated
 support modules, and each split test module is registered in the same suite
 lanes as its original.
@@ -109,8 +74,6 @@ The overseer adapters retain their entry points in `overseer_resume`,
 recovery and ownership, checkpoint evidence and Git reads, and mailbox posting
 and authority checks. `assurance_ledger` owns transactions, with vocabulary,
 records, parsing, file reads, and index rebuilding in `assurance_ledger_*`.
-Workbench's `service` owns remote dispatch; `service_queries` and
-`service_mutations` share the store and connector lanes in `service_models`.
 
 Turn dispositions retain their entry points in `turn_dispositions.py`, with
 continuation models, redirect settlement, mailbox waits, and failure handling in
@@ -227,27 +190,15 @@ After a terminal harness result and confirmed idle CPU samples, hang recovery ca
 
 The deterministic `lifecycle.worker-pause-exit-accounting` check grades failed exits that carry a worker pause declaration. It requires matching session, turn, and exit evidence, a trusted declaration source, and a held pause or write-guard refusal that reverted the session to pending. Only matching exits leave the unclassified-failure catch-all; shutdown causes remain the resource lane's responsibility. An explicitly aborted exit is owned by `lifecycle.operator-abort`, which now detects a missing acknowledgment even when no honored-abort record survived. The runner records an honored abort when a post-turn guard pauses a killed turn, preserving the guard's failure and pending session.
 
-## Workbench source layout
+## Typing registries
 
-The shared browser shell lives in `asl_workbench/static/`. `index.html` and
-`styles.css` assemble small files from `fragments/` and `styles/` through
-`asl_workbench.static_sources`; both HTTP deployments use that same reader.
-Composition preserves source order and needs no build step. Stylesheet cache
-validators cover the composed bytes, including changes to a fragment.
-Browser modules separate recovery rendering, reply and activity panels,
-operation receipts and submission, archive review, and queue rows. The original
-module paths retain their public exports. Browser and Python test entry points
-collect the focused suites under their existing test names.
-
-`pyproject.toml` enables strict mypy codes for both product packages. The
+`pyproject.toml` enables strict mypy codes for the product package. The
 `config/typing/` registries separately record which modules must also satisfy
 the extraction rules; the typing ratchet checks their coverage and floors.
 
 ## Extracted façade boundaries
 
 `supervisor_audit.py` remains the compatibility entry point, while `supervisor_audit_config.py`, `supervisor_audit_restricted.py`, `supervisor_audit_agent_models.py`, `supervisor_audit_agent_run.py`, and `supervisor_audit_terminal.py` own configuration, the read-only invocation, attempt records, retry processing, and terminal publication. `assurance_cli.py` similarly delegates shared rendering, browse, mutating, pending, and reconciliation commands to `assurance_cli_common.py`, `assurance_cli_browse.py`, `assurance_cli_actions.py`, `assurance_cli_pending.py`, and `assurance_cli_reconcile.py`; new callers patch or import the implementation owner, while the façade retains the established command surface.
-
-`workbench_archive.py` is the compatibility surface over focused archive modules: `workbench_archive_models.py` holds archive records and errors, `workbench_archive_storage.py` owns disk layout and metadata, `workbench_archive_operations.py` moves and restores entries, `workbench_archive_commands.py` owns registry changes, and `workbench_archive_workflows.py` assembles surface-neutral workflows.
 
 ## Accepting remote-ref updates after a paused review
 
@@ -367,21 +318,6 @@ require a fresh acknowledgement. Legacy and `--commit-at-end` checks retain
 their existing behavior. `asl status --json` exposes preview commands and durable
 recovery progress for operator inspection and supervisor audit.
 
-The remote ASL Workbench now carries plan launch and plan archive commands for
-idle plans, plus archive listing, restore, purge and retention settings. The Pi
-addresses plans and archive entries by opaque keys; the Mac resolves those keys
-and applies the same local safety checks. A remote launch uses the Mac's default
-profile. Cleanup review loads every matching catalog page under one revision,
-then submits one archive command per selected plan and waits for its receipt
-before continuing. The archive view uses the same per-entry receipt rule for
-restore and purge. A pending command is shown as pending until the Mac reports
-its result; an uncertain result stops the batch for operator review.
-The connector retains mutation outcome reports and refusal receipts even when
-the ordinary read-answer queue is full or the link drops; they still need to
-settle the Pi's journal after reconnecting. The Pi checks whether a plan is idle
-inside the operation-admission transaction before superseding an uncertain row,
-so a newer running snapshot keeps the outstanding-mutation hold in force.
-
-The Workbench's local half is split by what each module owns, and every dependency between these modules points one way. The registry, plan discovery, the per-plan summary, and launch live in a layered set of modules, each importing only the ones before it: `workbench_registry_models.py` holds the registry constants and record types (`LaunchProfile`, `RegistryPin`, `WorkbenchRegistry`, `DiscoveredPlan`, `DiscoveryResult`, `WorkbenchError`); `workbench_registry_coerce.py` tolerantly coerces hand-edited registry values; `workbench_registry.py` loads, saves and locks the registry (`load_registry`, `save_registry`, `mutate_registry`, `upsert_pin`); `workbench_discovery.py` owns `discover_plans`; `workbench_summary_model.py` holds the primary-state vocabularies and the `WorkbenchSummary` record; `workbench_summary_helpers.py` holds the small summary helpers; `workbench_summary_context.py` gathers one plan's inputs (`gather_context`) and builds the record (`SummaryContext.make`); `workbench_summary_active.py`, `workbench_summary_paused.py` and `workbench_summary_settled.py` hold the state classifiers; `workbench_summary.py` owns `build_workbench_summary` and `build_workbench_summaries`, trying the classifiers in priority order; `workbench_launch.py` owns `launch_plan` and `resume_plan_with_reply`; and `workbench_cli.py` owns the `asl workbench` registry and `asl plans` handlers. The Recovery Center lives in the `workbench_recovery_*.py` modules, layered so each imports only the ones before it: `workbench_recovery_models.py` holds the `WorkbenchRecovery` card and its evidence, action and command types, the `RECOVERY_KINDS` and `RECOVERY_ACTION_TARGETS` vocabularies and the pause-reason mapping; `workbench_recovery_state.py` holds the state-reading helpers the summary shares with it; `workbench_recovery_actions.py`, `workbench_recovery_evidence_checks.py` and `workbench_recovery_evidence_commit.py` build the action cards, repair commands and evidence rows; `workbench_recovery_payload.py` assembles the card; `workbench_recovery_builders_run.py`, `workbench_recovery_builders_state.py`, `workbench_recovery_conversation.py` and `workbench_recovery_review.py` hold the per-blocker builders; and `workbench_recovery_build.py` owns `build_workbench_recovery`. `workbench_summary` imports the build and state modules, and `workbench_recovery_build` names `DiscoveredPlan` for type checking only, so none of them imports the summary or registry modules at runtime. `workbench_workspace.py` is the lowest layer, the workspace projection (`_workspace_projection`, `_workspace_payload`) that summaries, pins, launches and recovery cards all report, importing only the `plans_*` modules. `workbench_archive.py` owns everything that moves a plan out of discovery or back into it: the on-disk archive layout under the state root, `archive_plan`, `restore_archive`, `purge_archive_entries`, `list_archive_entries`, `delete_plan`, the `ArchiveError` and `PlanDeleteError` refusals they raise, and the confirmed, surface-neutral wrappers (`archive_one`, `archive_many`, `restore_entry`, `review_archive`, `purge_entries`) that the HTTP routes, the `asl workbench` CLI and the remote connector share. It imports `workbench_registry` for the registry lock and `workbench_discovery` for discovery, and neither imports it back. Call and patch each of these names at the module that owns it; no module keeps an alias for any of them.
+The plan listing, plan summaries, recovery cards, and launch are split by what each module owns, and every dependency between these modules points one way. The registry, plan discovery, the per-plan summary, and launch live in a layered set of modules, each importing only the ones before it: `plan_pins_models.py` holds the registry constants and record types (`LaunchProfile`, `RegistryPin`, `PlanRegistry`, `DiscoveredPlan`, `DiscoveryResult`, `PlanRegistryError`); `plan_pins_coerce.py` tolerantly coerces hand-edited registry values; `plan_pins.py` loads, saves and locks the registry (`load_registry`, `save_registry`, `mutate_registry`, `upsert_pin`); `plan_scan.py` owns `discover_plans`; `plan_summary_model.py` holds the primary-state vocabularies and the `PlanSummary` record; `plan_summary_helpers.py` holds the small summary helpers; `plan_summary_context.py` gathers one plan's inputs (`gather_context`) and builds the record (`SummaryContext.make`); `plan_summary_active.py`, `plan_summary_paused.py` and `plan_summary_settled.py` hold the state classifiers; `plan_summary.py` owns `build_plan_summary` and `build_plan_summaries`, trying the classifiers in priority order; `plan_launch.py` owns `launch_plan` and `resume_plan_with_reply`; and `plans_cli.py` owns the `asl plans` handler. Recovery cards live in the `recovery_card_*.py` modules, layered so each imports only the ones before it: `recovery_card_models.py` holds the `RecoveryCard` card and its evidence, action and command types, the `RECOVERY_KINDS` and `RECOVERY_ACTION_TARGETS` vocabularies and the pause-reason mapping; `recovery_card_state.py` holds the state-reading helpers the summary shares with it; `recovery_card_commands.py`, `recovery_card_evidence_checks.py` and `recovery_card_evidence_commit.py` build the action cards, repair commands and evidence rows; `recovery_card_payload.py` assembles the card; `recovery_card_builders_run.py`, `recovery_card_builders_state.py`, `recovery_card_conversation.py` and `recovery_card_review.py` hold the per-blocker builders; and `recovery_card_build.py` owns `build_recovery_card`. `plan_summary` imports the build and state modules, and `recovery_card_build` names `DiscoveredPlan` for type checking only, so none of them imports the summary or registry modules at runtime. `plan_workspace.py` is the lowest layer, the workspace projection (`_workspace_projection`, `_workspace_payload`) that summaries, pins, launches and recovery cards all report, importing only the `plans_*` modules. Call and patch each of these names at the module that owns it; no module keeps an alias for any of them.
 
 Worker `asl ask --wait` deadlines now bound unsupervised time: a fresh mailbox lease extends the wait, while zero still polls once and lost supervision leaves a bounded deadline. Exhausted verification repairs carry `verification_repair_exhausted` into pause policy v5, requiring inspection instead of another automatic retry. Pause policy v6 does the same for an exhausted review-verdict repair (`review_verdict_repair_exhausted`), which shares the `verify-failed` reason. Commit-preflight pauses name the actual commit checkouts and apply to both startup and continuation. A repository refusal sourced from a task packet explains that registration scans plan files; intended additional scope must be declared there before migration. Audit evidence retains allowed external HEAD transitions as observations without adding them to the session's commit attempts or groups.

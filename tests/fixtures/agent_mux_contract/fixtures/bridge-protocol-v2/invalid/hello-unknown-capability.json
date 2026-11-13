@@ -12,7 +12,6 @@
       "run.resume",
       "run.stop_after_current",
       "run.abort",
-      "workbench.ensure",
       "run.redirect",
       "run.redirect_status",
       "run.recover_conversation",
@@ -37,7 +36,7 @@
     "protocol": 2,
     "type": "hello"
   },
-  "pointer": "/capabilities/12",
+  "pointer": "/capabilities/11",
   "reason": "invalid-enum",
   "root": "hello"
 }

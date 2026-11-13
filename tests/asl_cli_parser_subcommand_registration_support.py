@@ -20,6 +20,7 @@ from agent_session_loop import (
     control_cli,
     control_queue,
     metrics,
+    plans_cli,
     prepare_expand_ingest,
     prepare_models,
     redirect_ack,
@@ -30,8 +31,6 @@ from agent_session_loop import (
     review,
     turn_execution_constants,
     verification_contract_check,
-    workbench_cli,
-    workbench_server,
 )
 from tests.support import (
     REPO_ROOT,
@@ -77,21 +76,11 @@ class NumericFlagValidationTestsBase(unittest.TestCase):
         return stderr.getvalue()
 
 
-class WorkbenchGroupFlagTestsBase(unittest.TestCase):
-    """Serve flags on the `asl workbench` group reach serve and nothing else.
-
-    A non-serve leaf's own defaults used to overwrite the group's values, so
-    `asl workbench --json registry` printed text and `--port 1 --open
-    registry` was silently accepted.
-    """
-
-
 __all__ = [
     "NumericFlagValidationTestsBase",
     "ParserFlagSpellingTestsBase",
     "ParserSubcommandRegistrationTestsBase",
     "REPO_ROOT",
-    "WorkbenchGroupFlagTestsBase",
     "argparse",
     "bridge_protocol",
     "cli",
@@ -119,6 +108,5 @@ __all__ = [
     "turn_execution_constants",
     "unittest",
     "verification_contract_check",
-    "workbench_cli",
-    "workbench_server",
+    "plans_cli",
 ]

@@ -41,7 +41,6 @@ from .cli_parser_run import (
     _add_run_inspection_commands,
 )
 from .cli_parser_support import _AgentSessionLoopArgumentParser
-from .cli_parser_workbench import _add_workbench_commands
 
 
 def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
@@ -67,7 +66,6 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     _add_agent_mux_commands(subparsers)
     _add_diagnostics_commands(subparsers)
     _add_overseer_commands(subparsers)
-    _add_workbench_commands(subparsers)
     _add_control_commands(subparsers)
     _add_inbox_commands(subparsers)
     _add_worker_message_commands(subparsers)
@@ -84,7 +82,7 @@ def resolve_handler(
 
     Handlers are stored on the parser as ``"module:function"`` strings and only
     resolved when a command actually dispatches, so building or parsing the CLI
-    never imports the heavy handler modules (runner, workbench, review, ...).
+    never imports the heavy handler modules (runner, review, ...).
     """
     module_name, _, attr = args.handler_ref.partition(":")
     module = importlib.import_module(f".{module_name}", __package__)

@@ -37,8 +37,8 @@ class SubmissionTests(RedirectStoreTestCase):
     def test_feedback_never_rides_on_a_projected_request(self) -> None:
         """The one guarantee a projection cannot opt out of.
 
-        Not a style preference: `to_payload` feeds run state, events, the
-        Workbench and bridge receipts, so a text field here would put the
+        Not a style preference: `to_payload` feeds run state, events, and
+        bridge receipts, so a text field here would put the
         operator's words in every one of them.
         """
         secret = "do not paste this into a log"

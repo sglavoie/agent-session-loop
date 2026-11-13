@@ -40,8 +40,8 @@ def _add_control_commands(
         epilog=_group_epilogue("control", "asl control abort --help", guide=True),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    # Unlike `workbench`, the bare `asl control` form has no sensible default
-    # action, so a subcommand is required.
+    # The bare `asl control` form has no sensible default action, so a
+    # subcommand is required.
     control_sub = control_parser.add_subparsers(
         dest="control_command", required=True, metavar="COMMAND"
     )

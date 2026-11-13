@@ -1,6 +1,0 @@
-{
-  "direction": "up",
-  "error": "invalid-field",
-  "frame": "[1, 2, 3]",
-  "why": "A JSON array is not an envelope."
-}

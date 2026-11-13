@@ -60,7 +60,6 @@ class MailboxProtocolDocsTests(unittest.TestCase):
                 self.assertIn(marker, autopilot)
         for group in (
             "`bridge`",
-            "`workbench`",
             "`control`",
             "`inbox`,\n`outbox`",
             "`assurance`",
@@ -68,29 +67,14 @@ class MailboxProtocolDocsTests(unittest.TestCase):
             with self.subTest(group=group):
                 self.assertIn(group, autopilot)
 
-        # The workbench parent shows the serve flags, so neither document may
-        # apply the leaf-only sentence to it.
-        for marker in (
-            "a leaf-only group's",
-            "`asl workbench` is the exception",
-            "bare `asl workbench` form runs `asl workbench serve`",
-        ):
-            with self.subTest(workbench_marker=marker):
-                self.assertIn(marker, autopilot)
-
         for marker in (
             "asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]",
             "`asl outbox supervise --help`",
             "every supported candidate when detection is absent or ambiguous",
             "leaf-only group's help lists its leaves and none of their flags",
-            "`asl workbench` instead carries the serve flags on the parent",
         ):
             with self.subTest(readme_marker=marker):
                 self.assertIn(marker, supervision)
-        self.assertNotIn(
-            "`asl workbench`, `asl control`",
-            supervision,
-        )
 
     def test_docs_describe_activation_precedence_waits_and_fallback(self) -> None:
         docs = self._read("docs/agent-session-loop.md")

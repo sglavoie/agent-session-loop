@@ -18,31 +18,6 @@ target-version = "py314"
 # globs *.py and lint.sh only claims files with a shell shebang.
 extend-include = ["bin/.local/bin/agent-session-loop"]
 
-# The portable half of the Workbench is deployed to a Pi documented at Python
-# 3.13, while everything else here runs on the newer interpreter the repository
-# targets above. Pinning the floor in the linter is what makes the boundary
-# something a developer hits before a deployment does: a 3.14-only construct in
-# `asl_workbench` is a lint failure, not an import error on the Pi.
-# `asl_workbench.compatibility` enforces the same floor over the source, and
-# `tests/test_workbench_foundations.py` checks that this entry still exists.
-[tool.ruff.per-file-target-version]
-"asl_workbench/**/*.py" = "py313"
-# The portable test lane runs under the Pi's interpreter too -- the contract
-# invokes `python3.13 -m unittest -q tests.test_workbench_portable`, which CI's
-# `workbench-portable-py313` job in check.yml runs -- so the
-# module and the `tests` package initializer it loads through are pinned to the
-# same floor. Without this the formatter rewrites their `except` groups into
-# 3.14 grammar and the lane fails to import before a single test runs.
-"tests/__init__.py" = "py313"
-"tests/test_workbench_portable.py" = "py313"
-# The staging harness is copied to the Pi and run there beside the unpacked
-# release, so it is held to the Pi's interpreter for the same reason and by the
-# same mechanism. The cutover harness is copied there for the same purpose, and
-# on the day it runs the Pi is mid-migration, which is the worst moment to
-# discover a syntax error.
-"tests/workbench_staging.py" = "py313"
-"tests/workbench_cutover.py" = "py313"
-
 [tool.ruff.lint]
 # BLE001 makes every blind `except Exception`/`BaseException` in product code
 # carry a `# noqa: BLE001` next to the reason it must not narrow; RUF100 keeps
@@ -59,10 +34,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "BLE001", "RUF100"]
 "agent_session_loop/execution_timing*.py" = ["F401", "F403", "F405"]
 "agent_session_loop/diagnostics_export*.py" = ["E501", "F403", "F405"]
 "agent_session_loop/session_overview*.py" = ["E501", "F403", "F405"]
-"agent_session_loop/workbench_local*.py" = ["F403", "F405"]
 "agent_session_loop/supervisor_audit_agent*.py" = ["F401", "F403", "F405"]
-"asl_workbench/integration*.py" = ["F403", "F405"]
-"asl_workbench/operations*.py" = ["E501", "F403", "F405"]
+"agent_session_loop/operation_rules*.py" = ["E501", "F403", "F405"]
 "tests/asl_execution_timing_*.py" = ["F403", "F405"]
 "tests/asl_turn_finalization_*.py" = ["F403", "F405"]
 "tests/asl_turn_execution_*.py" = ["F401", "F403", "F405"]
@@ -72,12 +45,11 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "BLE001", "RUF100"]
 "tests/asl_write_guards_*.py" = ["F401", "F403", "F405"]
 "tests/asl_overseer_isolation_*.py" = ["F401", "F403", "F405"]
 "tests/asl_commit_groups_*.py" = ["F401", "F403", "F405"]
-"tests/workbench_interactions_*.py" = ["F403", "F405"]
 "tests/asl_review_cycle_*.py" = ["F401", "F403", "F405"]
 "tests/asl_review_transitions_*.py" = ["F401", "F403", "F405"]
 "tests/asl_overseer_history_*.py" = ["F401", "F403", "F405"]
 "tests/asl_startup_context_*.py" = ["F401", "F403", "F405"]
-"tests/asl_workbench_launch_*.py" = ["F401", "F403", "F405"]
+"tests/asl_plan_launch_*.py" = ["F401", "F403", "F405"]
 "tests/asl_supervisor_audit_checks_settlement_*.py" = ["F401", "F403", "F405"]
 "tests/asl_tail_*.py" = ["F401", "F403", "F405"]
 "tests/asl_live_redirect_*.py" = ["F401", "F403", "F405"]
@@ -92,11 +64,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "BLE001", "RUF100"]
 "tests/support_git.py" = ["F403", "F405"]
 "tests/support_processes.py" = ["F403", "F405"]
 "tests/support_review.py" = ["F403", "F405"]
-"tests/support_workbench.py" = ["F403", "F405"]
+"tests/support_run_state.py" = ["F403", "F405"]
 "tests/support_prepare.py" = ["F403", "F405"]
-"tests/workbench_acceptance*.py" = ["E501", "F403", "F405"]
-"tests/workbench_cutover*.py" = ["E501", "F403", "F405"]
-"tests/workbench_support*.py" = ["E501", "F403", "F405"]
 "tests/test_asl_execution_timing.py" = ["F401"]
 "tests/test_asl_tail.py" = ["F401"]
 "tests/test_asl_turn_finalization.py" = ["F401"]
@@ -107,19 +76,16 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "BLE001", "RUF100"]
 "tests/test_asl_write_guards.py" = ["F401"]
 "tests/test_asl_overseer_isolation.py" = ["F401"]
 "tests/test_asl_commit_groups.py" = ["F401"]
-"tests/test_workbench_interactions.py" = ["F401"]
 "tests/test_asl_review_cycle.py" = ["F401"]
 "tests/test_asl_review_transitions.py" = ["F401"]
 "tests/test_asl_overseer_history.py" = ["F401"]
 "tests/test_asl_startup_context.py" = ["F401"]
-"tests/test_asl_workbench_launch.py" = ["F401"]
+"tests/test_asl_plan_launch.py" = ["F401"]
 "tests/test_asl_supervisor_audit_checks_settlement.py" = ["F401"]
 # Static ``__all__`` declarations make split-module vocabularies visible to
 # mypy.  Keep those one-line declarations readable as a single contract.
 "agent_session_loop/execution_timing_models.py" = ["E501"]
 "agent_session_loop/supervisor_audit_agent_contract.py" = ["E501"]
-"agent_session_loop/workbench_local_core.py" = ["E501"]
-"asl_workbench/integration_core.py" = ["E501"]
 "tests/asl_execution_timing_support.py" = ["E501"]
 "tests/asl_live_redirect_support.py" = ["E501"]
 "tests/asl_turn_finalization_support.py" = ["E501"]
@@ -127,12 +93,6 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "BLE001", "RUF100"]
 [tool.mypy]
 files = [
     "agent_session_loop",
-    # The portable package starts life on this table rather than working
-    # towards it. Its boundary rules and the extraction rules are the same
-    # rules: it may not import the runner because it may not import ASL at
-    # all, and its payloads cross a process boundary to a Pi, which is the
-    # strongest reason to name what they hold.
-    "asl_workbench",
     "tests",
     "skills/asl/scripts",
     "skills/session-resplit/scripts",
@@ -152,7 +112,7 @@ exclude = "^tests/fixtures/asl_worker_verification/cache/"
 ignore_missing_imports = true
 # The codes below are suppressed repository-wide, and the list may only shrink.
 # Product code no longer needs any of them: every module in
-# `agent_session_loop` and `asl_workbench` is on one of the package table
+# `agent_session_loop` is on one of the package table
 # below, which re-enable all nine error codes, and the skill scripts sit on a
 # third table that re-enables six. What the list still covers is `tests/` (as
 # of mypy 2.3.1, with every code enabled: arg-type 644, union-attr 551,
@@ -191,7 +151,7 @@ disable_error_code = [
 # no runner imports. tests/asl_typing_ratchet_section_tables.py checks those
 # lists against the package trees and this shared mypy policy.
 [[tool.mypy.overrides]]
-module = ["agent_session_loop", "agent_session_loop.*", "asl_workbench", "asl_workbench.*"]
+module = ["agent_session_loop", "agent_session_loop.*"]
 enable_error_code = [
     "arg-type",
     "union-attr",

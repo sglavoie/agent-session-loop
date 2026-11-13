@@ -12,10 +12,10 @@ from agent_session_loop import (
     events,
     metrics,
     pause_policy,
+    recovery_card_models,
     review_continuation,
     run_persistence,
     turn_execution_constants,
-    workbench_recovery_models,
 )
 from tests.asl_docs_support import (
     ASL_GUIDE,
@@ -211,7 +211,7 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
             "`unknown-disposition` blocker.",
             self.docs,
         )
-        for recovery_kind in workbench_recovery_models.RECOVERY_KINDS:
+        for recovery_kind in recovery_card_models.RECOVERY_KINDS:
             self.assertIn(f"`{recovery_kind}`", self.docs)
 
     def test_review_metrics_additive_fields_are_documented(self) -> None:
@@ -250,8 +250,8 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
                 REPO_ROOT / ASL_SKILL_REVIEW_FINDINGS
             ).read_text(encoding="utf-8"),
             "skills/asl/scripts/asl_autopilot*.py": autopilot_module_sources(),
-            "agent_session_loop/workbench_launch.py": (
-                REPO_ROOT / "agent_session_loop" / "workbench_launch.py"
+            "agent_session_loop/plan_launch.py": (
+                REPO_ROOT / "agent_session_loop" / "plan_launch.py"
             ).read_text(encoding="utf-8"),
         }
         unsupported_guidance = (
@@ -327,7 +327,7 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
         )
         for producer in (
             "autopilot helper's central child environment",
-            "`workbench_launch.launch_plan` marks",
+            "`plan_launch.launch_plan` marks",
             "verifier marks its `asl status --json` smoke call",
         ):
             self.assertIn(producer, section)
@@ -335,7 +335,7 @@ class AuthoritativePauseMetricsDocsTests(unittest.TestCase):
     def test_launcher_docs_name_their_own_invocation_origin(self) -> None:
         for heading, origin in (
             ("### Safety model", cli_trace.ORIGIN_AUTOPILOT),
-            ("### Security model", cli_trace.ORIGIN_WORKBENCH),
+            ("### Launches and replies", cli_trace.ORIGIN_PLAN_LAUNCH),
         ):
             section = self.docs.split(heading, 1)[1].split("\n## ", 1)[0]
             self.assertIn(

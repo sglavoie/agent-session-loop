@@ -296,5 +296,4 @@ of, or plan an issue.
   what a healthy run and a run that never started look like alike.
 - Mailbox failure is fail-open for supervision: continue owning the child and
   let the runner use the ordinary pause/resume flow. Never invent a mailbox
-  reply, truncate the append-only log, delete a lease, or add Workbench
-  mailbox/model-control endpoints.
+  reply, truncate the append-only log, or delete a lease.

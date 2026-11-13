@@ -233,7 +233,7 @@ class InterruptionEarnsNothingTests(unittest.TestCase):
         self.assertEqual((), budget.references)
 
     def test_a_verification_failure_beside_it_still_spends_one(self) -> None:
-        # The companion claim: the budget is not simply inert here.
+        # The converse claim: the budget is not simply inert here.
         self.write_events(
             "interrupted", verification_cli.VERIFY_EXIT_REASON_FAILED, "interrupted"
         )

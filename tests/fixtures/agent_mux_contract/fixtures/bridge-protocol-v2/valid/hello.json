@@ -12,7 +12,6 @@
       "run.resume",
       "run.stop_after_current",
       "run.abort",
-      "workbench.ensure",
       "run.redirect",
       "run.redirect_status",
       "run.recover_conversation"

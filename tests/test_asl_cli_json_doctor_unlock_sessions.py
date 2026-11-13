@@ -61,7 +61,6 @@ class MissingPlanDirectoryReasonTests(unittest.TestCase):
                 "compact-state": ["compact-state", missing, "--state-dir", state_dir],
                 "unlock": ["unlock", missing, "--state-dir", state_dir],
                 "gc": ["gc", missing, "--state-dir", state_dir],
-                "workbench-pin": ["workbench", "pin", missing],
                 "acknowledge-external-changes": [
                     "acknowledge-external-changes",
                     missing,

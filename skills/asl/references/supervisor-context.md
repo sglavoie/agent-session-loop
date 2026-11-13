@@ -72,7 +72,7 @@ Supervise and answer
   read-result: Read the detached helper's verdict from the handshake's result_path once DONE ends the loop; fall back to asl status when the outcome was error.
     cat RESULT_PATH
 
-Leaf help (these groups list leaves only; asl workbench is the exception and shows its serve flags on the parent)
+Leaf help (these groups list leaves only)
   asl outbox supervise --help
   asl inbox reply --help
   asl inbox resolve --help
