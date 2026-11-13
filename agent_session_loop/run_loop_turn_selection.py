@@ -322,6 +322,7 @@ def _select_turn_harness(frame: RunFrame) -> RunResult | LoopSignal | None:
         retained_scope_repair=frame.retained_scope_repair,
         max_review_fix_cycles=frame.max_review_fix_cycles,
         review_requested=frame.review_requested,
+        provenance=frame.ctx.repair_provenance.baseline_for(frame.session_id),
     )
     frame.session_scope = repair_resumption.session_scope
     frame.regenerated_write_scope = repair_resumption.regenerated_write_scope

@@ -24,6 +24,7 @@ from . import (
     run_termination,
     verification_models,
 )
+from .repair_provenance import RepairProvenance
 
 # Registered implementation turns are enabled only because every such turn is
 # wrapped by the authoritative workspace snapshot guard below. Registered
@@ -71,6 +72,13 @@ class RunContext:
     #: them; it is keyed by session id and retired when a session completes.
     session_attempts: continuation_guards.SessionAttempts = dataclasses.field(
         default_factory=continuation_guards.SessionAttempts
+    )
+    #: The dirty-path digests this run can attest as its own, which a generated
+    #: repair child's commit preflight may sanction: plan artifacts a review
+    #: cycle left, and the retained work of a child's own earlier turn. Bound at
+    #: run start for the same reason as ``session_attempts``.
+    repair_provenance: RepairProvenance = dataclasses.field(
+        default_factory=RepairProvenance
     )
     #: Read off the payload once the readiness gate has passed, because the
     #: gate is what settles which control block the rest of the run answers to.

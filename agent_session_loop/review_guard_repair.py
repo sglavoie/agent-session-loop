@@ -9,6 +9,7 @@ from typing import Any
 from . import (
     plans_session_scope,
     review_guard_git,
+    review_guard_provenance,
     run_selection,
     verification_models,
 )
@@ -19,6 +20,7 @@ from .review_guard_retained import (
     _retained_turn_content_drift,
     _RetainedContentEvidence,
 )
+from .run_errors import RunError
 
 
 def _repair_commit_preflight(
@@ -29,8 +31,18 @@ def _repair_commit_preflight(
     workspace_evidence: WorkspaceEvidenceProbe,
     plan_dir: Path | None = None,
     retained_scope_repair: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Require a clean writable set for one repair child.
+
+    ``provenance`` maps repository-qualified paths to the content digest the
+    run recorded for them at a moment it could attest them as its own (see
+    ``repair_provenance``): plan artifacts a review cycle left in a plan
+    directory tracked inside the repository, and the work this same child's
+    earlier turn in this run retained when it ended without completing. A dirty
+    path is sanctioned only while its digest is unchanged, so an edit made
+    after the record, a path that was never recorded, and content that cannot
+    be digested all still refuse below exactly as unrelated dirt does.
 
     ``retained_scope_repair`` is the uncleared write-scope-violation record for
     this same child. On that path the runner is the author of *some* of the
@@ -71,6 +83,9 @@ def _repair_commit_preflight(
         ]
 
     dirty_repositories: list[dict[str, Any]] = []
+    provenance_sanctioned: list[str] = []
+    provenance_drifted: list[str] = []
+    provenance_errors: list[str] = []
     for alias, repository_path, root in selected:
         worktree = review_guard_git._run_git(
             root, ["rev-parse", "--is-inside-work-tree"]
@@ -104,8 +119,28 @@ def _repair_commit_preflight(
             "dirty_paths": qualified_paths,
         }
         details["repositories"].append(row)
-        if dirty_paths:
-            dirty_repositories.append(row)
+        residual = list(qualified_paths)
+        if residual and provenance:
+            proven, drifted, error = _provenance_sanctioned(
+                root, dirty_paths, qualified_paths, provenance
+            )
+            if error is not None:
+                provenance_errors.append(f"{alias or '.'}: {error}")
+            provenance_sanctioned.extend(proven)
+            provenance_drifted.extend(drifted)
+            residual = [path for path in residual if path not in set(proven)]
+            if proven:
+                row["provenance_sanctioned_paths"] = proven
+        if residual:
+            dirty_repositories.append(
+                row if residual == qualified_paths else {**row, "dirty_paths": residual}
+            )
+    if provenance_sanctioned or provenance_drifted or provenance_errors:
+        details["provenance"] = {
+            "sanctioned_dirty_paths": provenance_sanctioned,
+            "content_drifted_dirty_paths": provenance_drifted,
+            **({"errors": provenance_errors} if provenance_errors else {}),
+        }
 
     if dirty_repositories:
         if retained_scope_repair is not None:
@@ -189,7 +224,47 @@ def _repair_commit_preflight(
             "generated repair child requires clean writable repositories before "
             f"execution; dirty: {labels}"
         )
+        if provenance_drifted:
+            named = ", ".join(provenance_drifted[:3])
+            if len(provenance_drifted) > 3:
+                named += f" (+{len(provenance_drifted) - 3} more)"
+            message += (
+                "; content changed after the run recorded it as its own: " + named
+            )
         details["error"] = message
         details["dirty_repositories"] = dirty_repositories
         raise RepairCommitPreflightError(message, details)
     return details
+
+
+def _provenance_sanctioned(
+    root: Path,
+    dirty_paths: list[str],
+    qualified_paths: list[str],
+    provenance: Mapping[str, str],
+) -> tuple[list[str], list[str], str | None]:
+    """Split one repository's dirty paths by whether their recorded content holds.
+
+    Returns the sanctioned qualified paths, the recorded ones whose content has
+    since changed, and why the repository could not be measured at all. An
+    unmeasurable repository sanctions nothing: not being able to look is not
+    evidence that nothing moved.
+    """
+    if not any(path in provenance for path in qualified_paths):
+        return [], [], None
+    try:
+        evidence = review_guard_provenance._dirty_path_evidence(root)
+    except RunError as error:
+        return [], [], str(error)
+    sanctioned: list[str] = []
+    drifted: list[str] = []
+    for path, qualified in zip(dirty_paths, qualified_paths, strict=True):
+        recorded = provenance.get(qualified)
+        if recorded is None:
+            continue
+        current = evidence.digest(path)
+        if current is not None and current == recorded:
+            sanctioned.append(qualified)
+        else:
+            drifted.append(qualified)
+    return sanctioned, drifted, None

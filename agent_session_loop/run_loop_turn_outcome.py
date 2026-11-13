@@ -10,6 +10,7 @@ from . import (
     handoff_correction,
     handoff_guards,
     redirect_continuation,
+    repair_provenance,
     run_coordination_control_drain,
     run_coordination_mailbox_wait,
     run_inputs,
@@ -70,10 +71,28 @@ def _settle_turn_outcome(frame: RunFrame) -> RunResult | LoopSignal | None:
         disposition=terminating_disposition,
         guard=frame.turn_payload.get("workspace_write_guard"),
     )
+    # Still the same site, and still before any wait the disposition below
+    # enters: a repair child's cleared turn records what it left behind, so
+    # the relaunch that continues the child can prove its retained dirt is
+    # the dirt this turn left (ASI-168) -- and an edit made during a reply
+    # wait is not.
+    if frame.is_repair_session:
+        frame.ctx.repair_provenance.record_continuation(
+            session_id=frame.session_id,
+            cwd=frame.cwd,
+            plan_dir=frame.before.plan_dir,
+            verification_context=frame.ctx.verification_context,
+            session_scope=frame.session_scope,
+            guard=frame.turn_payload.get("workspace_write_guard"),
+        )
     with frame.ctx.persistence.lock:
         frame.ctx.payload[continuation_guards.SESSION_ATTEMPTS_PAYLOAD_KEY] = (
             frame.ctx.session_attempts.to_payload()
         )
+        if frame.is_repair_session:
+            frame.ctx.payload[repair_provenance.REPAIR_PROVENANCE_PAYLOAD_KEY] = (
+                frame.ctx.repair_provenance.to_payload()
+            )
     frame.ctx.persistence.write_state(frame.ctx.payload)
 
     if terminating_disposition == "interrupted":
@@ -334,6 +353,25 @@ def _settle_turn_outcome(frame: RunFrame) -> RunResult | LoopSignal | None:
         return LoopSignal.BREAK
     if settlement.action == turn_settlement.ACTION_RETRY:
         return LoopSignal.CONTINUE
+    if frame.is_review_session or frame.is_repair_session:
+        # A review that proceeds is one whose cycle just materialized repair
+        # children; nothing commits after a review turn, so the plan artifacts
+        # it and the materialization wrote are attested here, before the first
+        # child's preflight meets them (ASI-170). A repair child that proceeds
+        # completed and committed, so its continuation record retires.
+        if frame.is_review_session:
+            frame.ctx.repair_provenance.record_review_cycle(
+                cwd=frame.cwd,
+                plan_dir=frame.snapshot.plan_dir,
+                verification_context=frame.ctx.verification_context,
+            )
+        else:
+            frame.ctx.repair_provenance.retire(frame.session_id)
+        with frame.ctx.persistence.lock:
+            frame.ctx.payload[repair_provenance.REPAIR_PROVENANCE_PAYLOAD_KEY] = (
+                frame.ctx.repair_provenance.to_payload()
+            )
+        frame.ctx.persistence.write_state(frame.ctx.payload)
 
     run_coordination_control_drain.drain_external_control_queue(
         plan_dir=frame.snapshot.plan_dir,

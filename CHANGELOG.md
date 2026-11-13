@@ -62,6 +62,13 @@ A polish and hardening round after the public release.
   spent) instead of "Repair attempt 3 of 2".
 - The audit agent is told that an in-run audit precedes `run_finished`, so it
   stops reporting the pending terminal record of a completed run as missing.
+- A generated repair child no longer pauses as `commit-preflight` on dirt the
+  run itself produced: the plan artifacts a review cycle leaves in a plan
+  directory tracked inside the repository (ASI-170), or the child's own
+  retained work when the loop continues it after a reply, retry or
+  verification repair (ASI-168). The run records a digest of each path when it
+  can attest it and sanctions the path only while the digest still matches, so
+  later edits, unrecorded paths and unrelated work still refuse.
 - Copilot preparation and audit turns adapt to the remote-option change in
   CLI 1.0.103 while retaining their read-only restrictions. Lifecycle acceptance
   disables Copilot updates, refuses to verify a version that changes during the

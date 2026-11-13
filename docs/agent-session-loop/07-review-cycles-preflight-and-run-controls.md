@@ -64,7 +64,15 @@ Generated repair children use a mandatory runner-owned `per-child` commit
 policy even when ordinary `commit_mode` is null. Before each child launches,
 ASL requires a clean set of that child's writable repositories;
 failure pauses as `commit-preflight` with repository-qualified dirty paths and
-spends no harness turn. After verification, ASL commits only dirty aliases
+spends no harness turn. Two kinds of dirt are the run's own and are sanctioned
+by content, never by name: plan artifacts a review cycle left in a plan
+directory tracked inside the repository, and the work a child's own earlier
+turn retained when the loop continues that child in the same run (a reply, a
+retry, a verification repair). The run records a digest of each such path when
+it can attest it and sanctions it only while the digest still matches, so an
+edit after the record, an unrecorded path, or unrelated work still pauses; the
+`repair_commit_preflight` record names the sanctioned and drifted paths under
+`provenance`. After verification, ASL commits only dirty aliases
 attributed by the write guard, in registry order. A no-change child or a child
 whose worker already committed is clean and produces no runner commit. Partial
 multi-repository failures retain the existing durable commit-group recovery

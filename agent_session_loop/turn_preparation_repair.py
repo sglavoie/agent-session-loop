@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +120,7 @@ def resume_repair_session(
     retained_scope_repair: dict[str, Any] | None,
     max_review_fix_cycles: int,
     review_requested: bool,
+    provenance: Mapping[str, str] | None = None,
 ) -> RepairResumption:
     """Settle a generated repair child's scope, eligibility and clean tree.
 
@@ -197,6 +198,7 @@ def resume_repair_session(
             workspace_evidence=workspace_evidence._workspace_write_guard_evidence,
             plan_dir=snapshot.plan_dir,
             retained_scope_repair=retained_scope_repair,
+            provenance=provenance,
         )
     except review_guard.RepairCommitPreflightError as error:
         ctx.record_final_snapshot(snapshot)
