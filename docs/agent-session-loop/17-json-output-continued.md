@@ -9,7 +9,11 @@ reading the pause finds it without opening a turn artifact. Its fields are
 it settled under, `result`, the three repair counters
 `verification_repair_attempt`, `verification_repair_max_attempts`, and
 `verification_repair_exhausted` read from the pause details rather than
-recounted, the `commit_group` it ran, the failed `commit` when one came back
+recounted (the attempt is the session's graded verification failure count and
+the maximum is how many repairs those failures may earn, so the failure that
+spends a budget of 2 records attempt 3 with `verification_repair_exhausted:
+true`, and the retained-work commit message says so rather than "attempt 3 of
+2"), the `commit_group` it ran, the failed `commit` when one came back
 unsuccessful, an `error` string when the resolution refused before any group
 existed, and `residue`. `result` is one of `committed` (the relaunch starts on a
 clean worktree), `no-changes` (the turn retained nothing to commit),

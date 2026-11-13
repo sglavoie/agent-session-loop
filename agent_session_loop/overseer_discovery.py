@@ -67,6 +67,7 @@ was found.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -205,6 +206,13 @@ class Candidate:
     lifecycle: Lifecycle
     record_observed: bool
     ineligible_reasons: tuple[Ineligibility, ...]
+    #: The ``recoverable`` and ``user_action`` the run persisted in its own
+    #: ``pause_policy`` block, or ``None`` when it published none. That block is
+    #: the classification the runner paused under -- including what the pause
+    #: reason alone cannot say, such as a spent verification repair budget -- and
+    #: it is itself metadata, so reading it keeps this boundary metadata-only.
+    pause_recoverable: bool | None = None
+    pause_user_action: str | None = None
 
     @property
     def eligible(self) -> bool:
@@ -351,7 +359,29 @@ def _describe(plan_state_dir: Path, *, warnings: list[str]) -> Candidate:
         ),
         record_observed=True,
         ineligible_reasons=reasons,
+        pause_recoverable=_persisted_policy_flag(record, "recoverable", paused),
+        pause_user_action=_persisted_policy_action(record, paused),
     )
+
+
+def _persisted_pause_policy(
+    record: Mapping[str, Any], paused: bool
+) -> Mapping[str, Any] | None:
+    policy = record.get("pause_policy") if paused else None
+    return policy if isinstance(policy, Mapping) else None
+
+
+def _persisted_policy_flag(
+    record: Mapping[str, Any], key: str, paused: bool
+) -> bool | None:
+    policy = _persisted_pause_policy(record, paused)
+    value = policy.get(key) if policy is not None else None
+    return value if isinstance(value, bool) else None
+
+
+def _persisted_policy_action(record: Mapping[str, Any], paused: bool) -> str | None:
+    policy = _persisted_pause_policy(record, paused)
+    return _nonempty_str(policy.get("user_action")) if policy is not None else None
 
 
 def _unobserved(plan_state_dir: Path, ownership: Ownership) -> Candidate:

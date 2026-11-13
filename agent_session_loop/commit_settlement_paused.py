@@ -419,6 +419,7 @@ def _settle_paused_retained_work(
                 repair_attempt=repair_attempt,
                 repair_max_attempts=repair_max_attempts,
                 run_id=run_id,
+                repair_exhausted=repair_exhausted,
             )
             message_file = run_commit_paused._write_paused_work_message(
                 retained.artifact_dir, message

@@ -113,7 +113,9 @@ class PausedRetainedWorkRecordTests(PausedRetainedWorkCase):
         self.assertIsNone(record["verification_repair_exhausted"])
         self.assertEqual("timeout", record["pause_reason"])
         # And the message says nothing about an attempt it was never told.
-        self.assertNotIn("Repair attempt", self._message_file().read_text("utf-8"))
+        self.assertNotIn(
+            "Verification attempt", self._message_file().read_text("utf-8")
+        )
 
     # -- which pauses owe a commit at all ---------------------------------
 

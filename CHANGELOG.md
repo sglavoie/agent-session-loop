@@ -50,6 +50,11 @@ A polish and hardening round after the public release.
   the supervisor audit counts the turn as degraded. CLI trace end records and
   `asl metrics` recent failures now also name the innermost ASL source site of
   an uncaught exception (`<module>.<function>:<line>`), never its message.
+- A `verify-failed` pause whose repair budget is spent now reads as needing
+  inspection in `asl overseer watch` enrollments too, which used the pause
+  reason alone and called it recoverable. The retained-work commit names the
+  failed verification attempt and the repairs left (or that the budget is
+  spent) instead of "Repair attempt 3 of 2".
 - Copilot preparation and audit turns adapt to the remote-option change in
   CLI 1.0.103 while retaining their read-only restrictions. Lifecycle acceptance
   disables Copilot updates, refuses to verify a version that changes during the

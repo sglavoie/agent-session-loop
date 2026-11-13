@@ -29,6 +29,7 @@ def _paused_work_commit_message(
     repair_attempt: int | None,
     repair_max_attempts: int | None,
     run_id: str,
+    repair_exhausted: bool | None = None,
 ) -> str:
     """Render the message a recoverable pause's retained work is committed with.
 
@@ -53,6 +54,16 @@ def _paused_work_commit_message(
     :data:`commit_message.COMMIT_TITLE_PATTERN`; the whole message is returned
     already normalized by :func:`commit_message.format_commit_message`, so what
     is written to the message file is what git would keep.
+
+    ``repair_attempt`` and ``repair_max_attempts`` count different things, as
+    the pause records them: the attempt is the session's graded verification
+    failure count, the maximum is how many *repairs* those failures may earn.
+    The third failure against a budget of two repairs is therefore recorded as
+    attempt 3 with a maximum of 2 and is the one that exhausts it, so the
+    sentence names a failed verification attempt and the repairs left rather
+    than reading the two numbers as "attempt N of M" (ASI-167).
+    ``repair_exhausted`` is the pause's own verdict, which a repeated failure
+    fingerprint can reach before the count does.
     """
     at_end = commit_mode == run_selection.COMMIT_MODE_END
     if at_end:
@@ -80,10 +91,31 @@ def _paused_work_commit_message(
         and repair_attempt is not None
         and repair_max_attempts is not None
     ):
-        sentences.append(f"Repair attempt {repair_attempt} of {repair_max_attempts}.")
+        sentences.append(
+            _repair_budget_sentence(
+                repair_attempt, repair_max_attempts, exhausted=repair_exhausted
+            )
+        )
     sentences.append(f"Run: {run_id}.")
 
     return commit_message.format_commit_message(f"{subject}\n\n{' '.join(sentences)}")
+
+
+def _repair_budget_sentence(
+    attempt: int, max_attempts: int, *, exhausted: bool | None
+) -> str:
+    """Say which verification attempt failed and what repair budget is left."""
+    remaining = max_attempts - (attempt - 1)
+    if exhausted is True or remaining <= 0:
+        return (
+            f"Verification attempt {attempt} failed and the repair budget of "
+            f"{max_attempts} is spent, so the session is not retried automatically."
+        )
+    plural = "" if max_attempts == 1 else "s"
+    return (
+        f"Verification attempt {attempt} failed; {remaining} of {max_attempts} "
+        f"repair attempt{plural} left."
+    )
 
 
 def _sentence_case(text: str) -> str:

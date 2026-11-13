@@ -103,15 +103,15 @@ def _service(
     # has not been told about yet would name a configuration nobody observed.
     pass_.epoch = ledger.note_policy(config_fingerprint=decision.config_fingerprint)
     record = ledger.record_enrollment(decision)
-    classification = pause_policy.classify_pause(candidate.pause_reason)
+    recoverable, user_action = _pause_classification(candidate)
     pass_.enrolled.append(
         Enrollment(
             plan_dir=plan_dir,
             run_id=run_id,
             lifecycle=candidate.lifecycle,
             pause_reason=candidate.pause_reason,
-            user_action=classification["user_action"],
-            recoverable=bool(classification["recoverable"]),
+            user_action=user_action,
+            recoverable=recoverable,
             named=selection.names_plan(candidate.plan_dir),
             took_over=claim.took_over,
             superseded_run=claim.superseded_run,
@@ -121,3 +121,21 @@ def _service(
             observed_at=record.observed_at,
         )
     )
+
+
+def _pause_classification(
+    candidate: overseer_discovery.Candidate,
+) -> tuple[bool, str | None]:
+    """Label a pause the way the run that took it classified it.
+
+    The persisted ``pause_policy`` block is what ``asl status`` and the
+    supervisor read, and it already folds in details the reason cannot carry: a
+    ``verify-failed`` pause whose repair budget is spent needs inspection, not
+    another automatic retry. Re-classifying the reason alone would label that
+    pause recoverable here while every other surface says it needs a human.
+    Only a record that predates the block falls back to the reason.
+    """
+    if candidate.pause_recoverable is not None:
+        return candidate.pause_recoverable, candidate.pause_user_action
+    classification = pause_policy.classify_pause(candidate.pause_reason)
+    return bool(classification["recoverable"]), classification["user_action"]

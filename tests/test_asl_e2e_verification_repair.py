@@ -201,6 +201,58 @@ class VerificationRepairLoopTests(unittest.TestCase):
         )
         self.assertEqual(2, second_details["verification_repair_attempt"])
         self.assertTrue(second_details["verification_repair_exhausted"])
+        self._assert_status_requires_inspection()
+
+    def test_a_spent_attempt_budget_requires_inspection_in_status(self) -> None:
+        # ASI-167: the third graded failure records attempt 3 against a budget
+        # of 2 repairs and marks it exhausted, and every projection of that
+        # pause has to stop calling it automatically retryable.
+        for index in range(3):
+            self._write_plan(path="MISSING.md", name=f"missing-{index}")
+            _completed, payload = self._run()
+        details = payload["pause_details"]
+        self.assertEqual(3, details["verification_repair_attempt"])
+        self.assertEqual(2, details["verification_repair_max_attempts"])
+        self.assertTrue(details["verification_repair_exhausted"])
+        self._assert_status_requires_inspection()
+
+    def _assert_status_requires_inspection(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agent_session_loop",
+                "status",
+                str(self.plan_dir),
+                "--state-dir",
+                str(self.state_dir),
+                "--json",
+            ],
+            cwd=REPO_ROOT,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(REPO_ROOT)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        status = json.loads(completed.stdout)
+        runner = status["runner_state"]
+        policy = runner["pause_policy"]
+        self.assertFalse(policy["recoverable"])
+        self.assertTrue(policy["requires_user"])
+        self.assertEqual("inspect", policy["user_action"])
+        self.assertEqual(0, policy["max_retries"])
+        # The persisted state is what the audit's status section is built from.
+        persisted = json.loads(Path(runner["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(policy, persisted["pause_policy"])
+        action = persisted["action_required"]
+        self.assertEqual("verify-failed", action["reason"])
+        self.assertEqual("inspect", action["user_action"])
 
     # --- pure helper coverage --------------------------------------------
 

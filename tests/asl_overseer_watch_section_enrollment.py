@@ -420,6 +420,36 @@ class PreservedHumanDecisionTests(unittest.TestCase):
         self.assertIsNone(enrolled.user_action)
         self.assertTrue(enrolled.recoverable)
 
+    def test_a_spent_repair_budget_is_labelled_as_needing_inspection(self) -> None:
+        # ASI-167: `verify-failed` alone reads as recoverable, but the run
+        # persisted the policy it paused under, and with the repair budget
+        # spent that policy needs a human. The enrollment must agree with it.
+        details = {
+            "verification_repair_attempt": 3,
+            "verification_repair_max_attempts": 2,
+            "verification_repair_exhausted": True,
+        }
+        fleet = _Fleet(self)
+        fleet.write_run(
+            "plan-exhausted",
+            pause_reason="verify-failed",
+            pause_details=details,
+            pause_policy=pause_policy.classify_pause("verify-failed", details),
+        )
+
+        (enrolled,) = fleet.sweep().enrolled
+
+        self.assertEqual(pause_policy.USER_ACTION_INSPECT, enrolled.user_action)
+        self.assertFalse(enrolled.recoverable)
+
+    def test_a_record_without_a_policy_block_falls_back_to_its_reason(self) -> None:
+        fleet = _Fleet(self)
+        fleet.write_run("plan-legacy-timeout", pause_reason="timeout")
+
+        (enrolled,) = fleet.sweep().enrolled
+
+        self.assertTrue(enrolled.recoverable)
+
 
 def load_tests(
     loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: str | None

@@ -139,9 +139,9 @@ class PausedWorkCommitMessageTests(unittest.TestCase):
             "verified.\n"
             "Session 3 is back to `pending`; this commit records what the turn "
             "left behind so\n"
-            "the next attempt starts from a clean worktree. Repair attempt 1 of "
-            "2. Run:\n"
-            "run-20260904-abc123.",
+            "the next attempt starts from a clean worktree. Verification attempt 1 "
+            "failed; 2\n"
+            "of 2 repair attempts left. Run: run-20260904-abc123.",
             self._message(),
         )
 
@@ -192,17 +192,53 @@ class PausedWorkCommitMessageTests(unittest.TestCase):
         # The other three recoverable reasons relaunch the same session
         # unchanged, so the numbers are omitted even when a caller supplies
         # them -- the reason is what decides, not the arguments.
-        self.assertIn("Repair attempt 1 of 2.", self._flat(self._message()))
+        self.assertIn(
+            "Verification attempt 1 failed; 2 of 2 repair attempts left.",
+            self._flat(self._message()),
+        )
         for reason in self.NO_BUDGET_REASONS:
             with self.subTest(reason=reason):
                 self.assertNotIn(
-                    "Repair attempt", self._flat(self._message(pause_reason=reason))
+                    "Verification attempt",
+                    self._flat(self._message(pause_reason=reason)),
                 )
 
     def test_an_unnumbered_verification_pause_says_nothing_about_attempts(self) -> None:
         self.assertNotIn(
-            "Repair attempt",
+            "Verification attempt",
             self._flat(self._message(repair_attempt=None, repair_max_attempts=None)),
+        )
+
+    def test_the_failure_that_spends_the_budget_never_reads_as_attempt_n_of_m(
+        self,
+    ) -> None:
+        # ASI-167: the third graded failure against two repairs is recorded as
+        # attempt 3 with a maximum of 2. Rendering those as "Repair attempt 3
+        # of 2" read as an over-run budget; the failure exhausted it instead.
+        flat = self._flat(
+            self._message(
+                repair_attempt=3, repair_max_attempts=2, repair_exhausted=True
+            )
+        )
+        self.assertNotIn("3 of 2", flat)
+        self.assertIn(
+            "Verification attempt 3 failed and the repair budget of 2 is spent, "
+            "so the session is not retried automatically.",
+            flat,
+        )
+
+    def test_a_repeated_failure_reads_as_spent_before_the_count_runs_out(
+        self,
+    ) -> None:
+        flat = self._flat(
+            self._message(
+                repair_attempt=2, repair_max_attempts=2, repair_exhausted=True
+            )
+        )
+        self.assertIn("the repair budget of 2 is spent", flat)
+        self.assertIn(
+            "1 of 2 repair attempts left.",
+            self._flat(self._message(repair_attempt=2, repair_exhausted=False)),
         )
 
     def test_the_rendered_message_is_committable_as_written(self) -> None:
