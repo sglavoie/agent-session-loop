@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import cli_trace
+from . import cli_trace, mailbox_files
 
 ENV_VAR = "ASL_CONTROL_PLANE_FAILURE_LOG"
 FILE_NAME = "control-plane-failures.jsonl"
@@ -90,7 +90,11 @@ def record(
         blob = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
         # No O_CREAT of the directory: a turn directory that is gone belongs to
         # a run that is gone, and recreating it would leave a stray turn behind.
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        # Never follow a link or open a FIFO at the named path, like the
+        # mailbox's own appenders.
+        fd = mailbox_files.open_regular_file(
+            Path(target), os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        )
         try:
             os.write(fd, blob.encode("utf-8"))
         finally:

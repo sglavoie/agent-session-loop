@@ -151,6 +151,15 @@ class WorkerControlCommandTests(unittest.TestCase):
 
         self.assertFalse((self.tmp / "gone").exists())
 
+    def test_a_linked_log_is_never_written_through(self) -> None:
+        victim = self.tmp / "victim.txt"
+        victim.write_text("untouched\n")
+        self.log.symlink_to(victim)
+
+        self.assertEqual(1, self.inbox_read(self.tmp / "missing-plan"))
+
+        self.assertEqual("untouched\n", victim.read_text())
+
     def test_degradation_keeps_an_exact_count_and_bounded_records(self) -> None:
         total = control_plane_failures.RECORD_LIMIT + 3
         lines = [
