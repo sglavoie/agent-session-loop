@@ -268,6 +268,71 @@ class StreamSessionPromptTests(TempDirTestCase):
         self.assertFalse(stdin.closed_by_asl)
         self.assertTrue(session.note_result())
 
+    def test_task_followup_answers_guidance_it_echoed(self) -> None:
+        # ASI-151 (run 20261105T203847642361Z-3001): the main result left
+        # stdin open for a background check; the task notification opened a
+        # follow-up, guidance written mid-follow-up was echoed and answered
+        # inside it, and no separate result ever came. The follow-up result
+        # must settle the echoed guidance and close stdin, or the idle root
+        # waits on "unanswered-messages" forever.
+        session, stdin = session_with()
+        session.send_prompt()
+        processor = harness_claude._ClaudeStreamJsonOutputProcessor(session)
+
+        def emit(record: dict[str, Any]) -> None:
+            processor.process_chunk("stdout", json.dumps(record) + "\n")
+
+        def echo(text: str) -> None:
+            emit(dict(type="user", message=dict(role="user", content=text)))
+
+        echo("do the work")
+        emit(dict(type="system", subtype="task_started", task_id="check"))
+        emit(dict(type="result", subtype="success", result="waiting on check"))
+        self.assertEqual("background-tasks", session.stdin_hold_reason)
+        emit(dict(type="system", subtype="task_notification", task_id="check"))
+        emit(dict(type="system", subtype="init", session_id="s"))
+        session.steer(request_for())
+        echo("prefer the smaller change")
+        self.assertFalse(stdin.closed_by_asl)
+
+        emit(
+            dict(
+                type="result",
+                subtype="success",
+                result="done; on the guidance: noted",
+                origin={"kind": "task-notification"},
+            )
+        )
+
+        self.assertTrue(stdin.closed_by_asl)
+        self.assertIsNone(session.stdin_hold_reason)
+        self.assertTrue(processor.final_result_seen)
+
+    def test_task_followup_with_no_task_left_is_terminal_for_the_sentinel(
+        self,
+    ) -> None:
+        # Guidance the CLI never echoed keeps stdin held after the follow-up,
+        # which is right, but with no background task left that follow-up is
+        # as final as a main-turn result: the hang sentinel must learn it
+        # arrived so a root left idle behind the hold can still be recovered.
+        session, stdin = session_with()
+        session.send_prompt()
+        processor = harness_claude._ClaudeStreamJsonOutputProcessor(session)
+
+        def emit(record: dict[str, Any]) -> None:
+            processor.process_chunk("stdout", json.dumps(record) + "\n")
+
+        emit(dict(type="system", subtype="task_started", task_id="check"))
+        emit(dict(type="result", subtype="success", result="waiting on check"))
+        emit(dict(type="system", subtype="task_notification", task_id="check"))
+        emit(dict(type="system", subtype="init", session_id="s"))
+        session.steer(request_for())
+        emit(dict(type="result", origin={"kind": "task-notification"}))
+
+        self.assertFalse(stdin.closed_by_asl)
+        self.assertEqual("unanswered-messages", session.stdin_hold_reason)
+        self.assertTrue(processor.final_result_seen)
+
     def test_main_turn_can_consume_task_results_inline(self) -> None:
         session, stdin = session_with()
         session.send_prompt()

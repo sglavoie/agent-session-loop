@@ -142,8 +142,15 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
                 # message: without it the hang sentinel never learns a result
                 # arrived and post-result recovery cannot arm (ASI-151). Only a
                 # task-notification follow-up that leaves the conversation
-                # open is not terminal.
-                self._final_result_seen = ended or not background_followup
+                # open for a background task still running is not terminal; a
+                # follow-up with no task left is as final as a main-turn
+                # result, so a root left idle behind any other hold can still
+                # be recovered (stdin released first, then the signal path).
+                self._final_result_seen = (
+                    ended
+                    or not background_followup
+                    or not self._session.background_tasks_pending
+                )
             result = record.get("result")
             if isinstance(result, str):
                 self._final_result = result

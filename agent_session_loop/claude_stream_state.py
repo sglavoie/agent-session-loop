@@ -107,6 +107,12 @@ class _ClaudeStreamState:
                 return "unanswered-messages"
             return "open"
 
+    @property
+    def background_tasks_pending(self) -> bool:
+        """Whether a background task the CLI announced is still unfinished."""
+        with self._state_lock:
+            return bool(self._background_tasks)
+
     def release_stdin(self) -> bool:
         """Close a stdin held open after a result; ``True`` if this closed it.
 
@@ -256,7 +262,8 @@ class _ClaudeStreamState:
         echoed before it, including guidance taken up in the active tool loop.
         Without a new echo it covers one message, preserving the older CLI
         behavior. Unacknowledged queued guidance and background tasks keep
-        stdin open. Synthetic task results do not answer queued user messages.
+        stdin open. A synthetic task result answers the messages echoed before
+        it, but never a queued user message the CLI has not echoed.
         Returns whether this result ends the conversation.
         """
         # Serialize the decision and close with writes: a guidance write must
@@ -285,10 +292,20 @@ class _ClaudeStreamState:
                         ),
                         default=0,
                     )
+                    # Echoed messages are answered by whichever result follows
+                    # them, a task-notification follow-up included: the CLI
+                    # folds guidance it took up mid-request into that
+                    # follow-up's answer and emits no separate result for it.
+                    # Leaving them outstanding held stdin open on
+                    # "unanswered-messages" behind an idle root, so the CLI
+                    # never saw EOF and never exited (ASI-151). Only the
+                    # unechoed one-message credit is withheld from follow-ups:
+                    # a synthetic result does not answer a queued message the
+                    # CLI never took up.
+                    credited = self._messages_answered
                     if not background_followup:
-                        self._messages_answered = max(
-                            self._messages_answered + 1, echoed_through
-                        )
+                        credited += 1
+                    self._messages_answered = max(credited, echoed_through)
                     idle = (
                         self._messages_answered >= self._messages_written
                         and not self._background_tasks

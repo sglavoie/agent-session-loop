@@ -34,6 +34,14 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- A Claude turn whose background-task follow-up also answered guidance
+  delivered mid-follow-up no longer hangs after its last result. The follow-up
+  result now settles guidance the CLI echoed, so stdin closes and the CLI
+  exits, instead of holding stdin on `unanswered-messages` behind an idle root
+  until someone killed it (ASI-151). A follow-up result with no background task
+  left now also arms post-result hang recovery, so a root idle behind any other
+  hold is still released and, if needed, signalled.
+
 - Copilot preparation and audit turns adapt to the remote-option change in
   CLI 1.0.103 while retaining their read-only restrictions. Lifecycle acceptance
   disables Copilot updates, refuses to verify a version that changes during the
