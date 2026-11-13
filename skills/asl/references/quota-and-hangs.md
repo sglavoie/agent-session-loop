@@ -50,8 +50,12 @@ automatic recovery attempt: it re-samples the tree, requires the harness root
 and each deepest leaf to retain the same pid, birth time, command, and ancestry,
 then sends SIGTERM once to the verified leaves. It never escalates to SIGKILL,
 never targets parent shells, and never does this for generic `zero_cpu_idle`, a
-progressing or failed sample, a root-only tree, or when process sweeping is
-disabled. Resumed output clears the episode and the same runner continues.
+progressing or failed sample, or when process sweeping is disabled. A
+root-only tree after a result (no descendants left) gets the separate
+`verified_root_shutdown` policy instead: a Claude root still holding stdin has
+it released first, then the identity-verified root gets SIGTERM and, only if
+it is still the same process with no new descendants after a 30-second grace,
+one SIGKILL. Resumed output clears the episode and the same runner continues.
 `worker_hung` means that recovery was inapplicable or did not resume the turn;
 the supervised child stays alive and keeps the plan lock. Its terminal
 `supervision-end` record therefore marks the end of supervision only: that live
