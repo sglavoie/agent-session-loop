@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 # ruff: noqa: F403, F405
 from tests.asl_scope_recovery_test_support import *
 
@@ -166,3 +168,67 @@ class ExternalChangeCommitTargetTests(unittest.TestCase):
         )
 
         self.assertEqual(["notes"], [target["alias"] for target in targets])
+
+    def test_session_commit_ignores_external_commit_under_a_nested_path(self):
+        # ASI-163's shape: the registry path is not the alias (the workspace
+        # root sits above the checkouts, so the guard keys the change map by
+        # `<dir>/<repo>`), the external repository gained a commit *and* kept
+        # uncommitted edits while the session ran, and the session only wrote
+        # its own repository. The external record is neither a commit target
+        # nor staged, so the authorized and changed aliases still agree.
+        from agent_session_loop import commit_settlement, verification_models
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        workspace = root / "workspace"
+        specs = (
+            ("notes", "projects/notes", "git@github.com:example/notes.git"),
+            ("tt", "projects/tt", "git@github.com:example/tt.git"),
+        )
+        repos = init_multi_repo_workspace(workspace, specs)
+        plan = root / "plan"
+        write_multi_repo_plan(plan, ("pending",), specs=specs)
+        registry = plans_registry.read_repository_registry(plan)
+        resolved = workspaces.resolve_workspace(workspace, registry)
+
+        def capture():
+            return repository_evidence.capture_registered_snapshot(
+                workspace, plan, ("projects/notes", "projects/tt")
+            )
+
+        before = capture()
+        (repos["notes"] / "README.md").write_text("session work\n")
+        (repos["tt"] / "committed.txt").write_text("operator commit\n")
+        subprocess.run(["git", "add", "committed.txt"], cwd=repos["tt"], check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "operator"], cwd=repos["tt"], check=True
+        )
+        (repos["tt"] / "wip.txt").write_text("operator wip\n")
+        guard = workspace_evidence._workspace_write_guard_evidence(
+            workspace=resolved,
+            scope=plans_session_scope.SessionScope(
+                reads=("notes", "tt"), writes=("notes",)
+            ),
+            comparison=repository_evidence.compare_workspace_snapshots(
+                before, capture()
+            ),
+            exclude=(),
+            include_ignored=False,
+            external_change_aliases=frozenset({"tt"}),
+        )
+        self.assertTrue(guard["passed"])
+        self.assertEqual(["notes"], guard["authorized_aliases"])
+        self.assertEqual(["projects/tt"], list(guard["external_changes"]))
+        self.assertTrue(guard["changed"]["projects/tt"]["head_changed"])
+
+        targets = commit_settlement._registered_session_commit_targets(
+            verification_models.VerificationContext(
+                root=resolved.root, workspace=resolved
+            ),
+            guard,
+        )
+
+        self.assertEqual(["notes"], [target["alias"] for target in targets])
+        staged = [path for target in targets for path in target["staging_paths"]]
+        self.assertEqual(["notes:README.md"], staged)
