@@ -6,6 +6,7 @@ import functools
 from pathlib import Path
 
 from . import (
+    control_plane_failures,
     events,
     guards,
     guidance_delivery,
@@ -382,6 +383,11 @@ def _stage_turn_launch(frame: RunFrame) -> RunResult | LoopSignal | None:
                 frame.turn_harness
             ).enforces_guard_pretool,
         )
+    # A worker's own `asl inbox read` that fails is invisible from here unless
+    # it says so; this names where it reports (ASI-169).
+    frame.turn_env[control_plane_failures.ENV_VAR] = str(
+        frame.paths["artifact_dir"] / control_plane_failures.FILE_NAME
+    )
 
     frame.record_guidance_delivery = (
         functools.partial(

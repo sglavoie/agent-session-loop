@@ -76,6 +76,7 @@ def _recent_failure_entry(
         if isinstance(end.get("duration_ms"), (int, float))
         else None,
         "exception_type": _string_or_none(end.get("exception_type")),
+        "exception_site": _string_or_none(end.get("exception_site")),
     }
     return {name: entry[name] for name in metrics_models.RECENT_FAILURE_FIELDS}
 

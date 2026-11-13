@@ -147,6 +147,8 @@ def _print_cli_invocations_section(section: dict[str, Any]) -> None:
     print(f"  recent failures ({len(failures)}):")
     for entry in failures:
         exception = entry["exception_type"]
+        if exception and entry.get("exception_site"):
+            exception = f"{exception} at {entry['exception_site']}"
         print(
             f"    {entry['timestamp']} {entry['command']} "
             f"{entry['outcome']} exit {entry['exit_code']} "

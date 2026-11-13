@@ -42,6 +42,14 @@ A polish and hardening round after the public release.
   left now also arms post-result hang recovery, so a root idle behind any other
   hold is still released and, if needed, signalled.
 
+- A worker's failed `asl inbox read` (or `inbox acknowledge`, `ask`, `notify`)
+  no longer leaves its turn looking clean. The runner names a per-turn
+  `control-plane-failures.jsonl` in the worker's environment, the failing
+  command records itself there without content, and the turn result carries
+  `control_plane_degradation`, a `control_plane_degraded` event is appended, and
+  the supervisor audit counts the turn as degraded. CLI trace end records and
+  `asl metrics` recent failures now also name the innermost ASL source site of
+  an uncaught exception (`<module>.<function>:<line>`), never its message.
 - Copilot preparation and audit turns adapt to the remote-option change in
   CLI 1.0.103 while retaining their read-only restrictions. Lifecycle acceptance
   disables Copilot updates, refuses to verify a version that changes during the

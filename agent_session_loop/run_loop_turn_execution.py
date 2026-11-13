@@ -197,6 +197,12 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
             degradation=frame.turn_payload.get("harness_degradation"),
             identity=frame.turn_identity,
         )
+        run_persistence._append_control_plane_degradation_event(
+            event_path=frame.ctx.event_path,
+            persistence=frame.ctx.persistence,
+            degradation=frame.turn_payload.get("control_plane_degradation"),
+            identity=frame.turn_identity,
+        )
         frame.ctx.persistence.write_state(frame.ctx.payload)
 
     if frame.abort_signal.armed and not frame.result.aborted:

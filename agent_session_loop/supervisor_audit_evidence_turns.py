@@ -172,8 +172,12 @@ def _turn_section(collector: _Collector, directory: Path) -> dict[str, Any]:
         turn["anomalous"] = _turn_shows_failure(result)
         # Beside ``anomalous``, never folded into it: a harness that lost an
         # auxiliary transport and still produced a usable turn is degraded, and
-        # counting that as an anomaly would contradict every successful run.
-        turn["degraded"] = bool(result.get("harness_degradation"))
+        # counting that as an anomaly would contradict every successful run. So
+        # is a worker whose own `asl inbox read` (or other control command)
+        # failed mid-turn: the turn stands, but a guidance read may be missing.
+        turn["degraded"] = bool(
+            result.get("harness_degradation") or result.get("control_plane_degradation")
+        )
     else:
         collector.omissions.record("turns", reason or REASON_MALFORMED, str(directory))
         turn["result"] = {"available": False, "reason": reason or REASON_MALFORMED}

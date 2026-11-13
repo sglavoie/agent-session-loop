@@ -401,6 +401,28 @@ def _append_harness_degradation_event(
     )
 
 
+def _append_control_plane_degradation_event(
+    *,
+    event_path: Path,
+    persistence: _RunPersistence,
+    degradation: dict[str, Any] | None,
+    identity: dict[str, Any],
+) -> None:
+    """Record a worker whose own ASL control command failed during the turn.
+
+    Like a harness degradation it carries no pause or failure reason: the turn
+    keeps the status it earned, and this is what keeps a lost guidance read
+    from being accepted as though it had happened.
+    """
+    if not degradation:
+        return
+    persistence.append_event(
+        event_path,
+        events.CONTROL_PLANE_DEGRADED_EVENT,
+        {**identity, **degradation},
+    )
+
+
 def _agent_mux_loop_payload(
     payload: dict[str, Any],
     *,

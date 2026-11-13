@@ -10,7 +10,7 @@ import importlib
 import sys
 from collections.abc import Callable, Sequence
 
-from . import __version__, cli_trace
+from . import __version__, cli_trace, control_plane_failures
 from .cli_defaults import _INTERRUPTED_EXIT, program_name
 from .cli_parser_assurance import _add_assurance_commands
 from .cli_parser_control import _add_control_commands
@@ -91,6 +91,24 @@ def resolve_handler(
     return getattr(module, attr)
 
 
+def _finish(
+    invocation: cli_trace.Invocation,
+    args: argparse.Namespace,
+    *,
+    exit_code: int | None,
+    outcome: str,
+    exception: BaseException | None = None,
+) -> None:
+    """Close the trace pair and report a failed worker control command."""
+    invocation.finish(exit_code=exit_code, outcome=outcome, exception=exception)
+    control_plane_failures.record(
+        getattr(args, "handler_ref", None),
+        outcome=outcome,
+        exit_code=exit_code,
+        exception=exception,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser(prog=program_name())
     raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -105,23 +123,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         exit_code = resolve_handler(args)(args)
     except KeyboardInterrupt:
-        invocation.finish(
-            exit_code=_INTERRUPTED_EXIT, outcome=cli_trace.OUTCOME_INTERRUPTED
+        _finish(
+            invocation,
+            args,
+            exit_code=_INTERRUPTED_EXIT,
+            outcome=cli_trace.OUTCOME_INTERRUPTED,
         )
         return _INTERRUPTED_EXIT
     except SystemExit as exit_request:
         raised_code = cli_trace.normalize_exit_code(exit_request.code)
-        invocation.finish(
+        _finish(
+            invocation,
+            args,
             exit_code=raised_code,
             outcome=cli_trace.outcome_for_exit_code(raised_code),
         )
         raise
     except Exception as error:
-        invocation.finish(
-            exit_code=None, outcome=cli_trace.OUTCOME_EXCEPTION, exception=error
+        _finish(
+            invocation,
+            args,
+            exit_code=None,
+            outcome=cli_trace.OUTCOME_EXCEPTION,
+            exception=error,
         )
         raise
-    invocation.finish(
-        exit_code=exit_code, outcome=cli_trace.outcome_for_exit_code(exit_code)
+    _finish(
+        invocation,
+        args,
+        exit_code=exit_code,
+        outcome=cli_trace.outcome_for_exit_code(exit_code),
     )
     return exit_code

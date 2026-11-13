@@ -109,6 +109,12 @@ PROCESS_SWEEP_EVENT = "process_sweep"
 # pause or failure reason, so the turn keeps the status its own exit code
 # earned, and a closure that recurs every launch is recorded instead of silent.
 HARNESS_DEGRADED_EVENT = "harness_degraded"
+# Appended when a worker's own ASL control command (`asl inbox read`, `asl ask`,
+# ...) failed during its turn and reported so through the turn's
+# `control-plane-failures.jsonl`. A degradation, not a failure: the turn keeps
+# its status, and the record is what stops a missed guidance read from being
+# indistinguishable from a clean one.
+CONTROL_PLANE_DEGRADED_EVENT = "control_plane_degraded"
 # Appended once per turn, before the harness starts, stating which conversation
 # the turn was decided to run on and why. Recorded even when the answer is
 # "open a new one", because the interesting question months later is which turns

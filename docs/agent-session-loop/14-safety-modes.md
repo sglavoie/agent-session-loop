@@ -131,10 +131,11 @@ A record carries only vocabulary the parser already owns plus process facts:
 `schema_version`, `event`, `invocation_id`, `timestamp`, `pid`, `command_path`
 (recognized subcommand names), `options` (recognized option names), `help_depth`,
 `harness`, `origin`, and — on the `end` record — `exit_code`, `outcome`,
-`duration_ms`, and `exception_type`. Raw argv, option values, positional values,
-unknown tokens, paths, environment values, message bodies, captured output, and
-exception messages are never assembled into a record, so a trace file cannot
-leak content. An option value is counted and skipped rather than inspected,
+`duration_ms`, `exception_type`, and `exception_site` (the innermost ASL frame
+an uncaught exception passed through, as `<module>.<function>:<line>`). Raw argv,
+option values, positional values, unknown tokens, paths, environment values,
+message bodies, captured output, and exception messages are never assembled into
+a record, so a trace file cannot leak content. An option value is counted and skipped rather than inspected,
 which is why `--state-dir metrics` cannot promote `metrics` into the command
 path.
 

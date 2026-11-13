@@ -44,6 +44,7 @@ ALLOWED_END_FIELDS = ALLOWED_START_FIELDS | {
     "outcome",
     "duration_ms",
     "exception_type",
+    "exception_site",
 }
 
 
@@ -203,6 +204,34 @@ class FailureOutcomeTests(CliTraceTestCase):
         self.assertEqual(cli_trace.OUTCOME_EXCEPTION, end["outcome"])
         self.assertIsNone(end["exit_code"])
         self.assertNotIn("sk-live", self.today_file().read_text(encoding="utf-8"))
+
+    def test_exception_records_the_innermost_asl_site_without_its_message(
+        self,
+    ) -> None:
+        # ASI-169: the trace kept `NameError` and nothing else, so the line to
+        # open had to be dug out of a harness transcript.
+        from agent_session_loop import plans_snapshot
+
+        missing = self.tmp_path / "secret-missing-plan"
+
+        def failing(_args: argparse.Namespace) -> int:
+            plans_snapshot.require_plan_directory(missing)
+            return 0
+
+        with self.assertRaises(plans_snapshot.PlanError):
+            self.run_main(["tail", "/tmp/plan"], failing)
+
+        _, end = self.assert_pair(self.records())
+        site = end["exception_site"]
+        self.assertRegex(site, r"^plans_snapshot\.require_plan_directory:\d+$")
+        self.assertNotIn("secret-missing-plan", self.today_file().read_text())
+
+    def test_exception_site_is_null_without_an_exception(self) -> None:
+        self.run_main(["tail", "/tmp/plan"], _handler(0))
+
+        _, end = self.assert_pair(self.records())
+
+        self.assertIsNone(end["exception_site"])
 
     def test_handler_system_exit_is_traced_and_still_propagates(self) -> None:
         def exiting(_args: argparse.Namespace) -> int:

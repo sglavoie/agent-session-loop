@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import sys
+
 from agent_session_loop import (
     clock,
     config,
+    control_plane_failures,
     events,
     harness_failures,
     plans_files,
@@ -15,6 +19,7 @@ from agent_session_loop import (
 from tests.harness_integration_base import FakeHarnessIntegrationBase
 from tests.harness_integration_support import OBSERVED_LAUNCH_CLOSURE
 from tests.support import (
+    REPO_ROOT,
     read_jsonl,
 )
 
@@ -414,6 +419,52 @@ class StatusSnapshotTests(FakeHarnessIntegrationBase):
             "| S2 | Two | pending |",
             (plan_dir / "context.md").read_text(encoding="utf-8"),
         )
+
+    def test_a_worker_inbox_read_that_crashes_degrades_the_turn(self) -> None:
+        # ASI-169: the worker's last `asl inbox read` died on a NameError and
+        # the session was accepted as though the read had happened.
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        crash = (
+            "import sys; sys.path.insert(0, sys.argv[1]);"
+            "from unittest import mock;"
+            "from agent_session_loop import cli, plans_snapshot;"
+            "mock.patch.object(plans_snapshot, 'inspect_plan',"
+            " side_effect=NameError('context_path')).start();"
+            "cli.main(['inbox', 'read', sys.argv[2] + '/'])"
+        )
+        completed, payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            extra_env={
+                "FAKE_CODEX_WORKER_COMMAND_JSON": json.dumps(
+                    [sys.executable, "-c", crash, str(REPO_ROOT), str(plan_dir)]
+                )
+            },
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        turn = payload["turns"][0]
+        # A degradation, not a failure: the turn keeps the status it earned.
+        self.assertEqual("complete", turn["status_result"])
+        degradation = turn["control_plane_degradation"]
+        self.assertEqual(control_plane_failures.MARKER, degradation["marker"])
+        (failure,) = degradation["failures"]
+        self.assertEqual("inbox read", failure["command"])
+        self.assertEqual("NameError", failure["exception_type"])
+        records = read_jsonl(
+            state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+        )
+        degraded = [
+            record
+            for record in records
+            if record.get("name") == events.CONTROL_PLANE_DEGRADED_EVENT
+        ]
+        self.assertEqual(1, len(degraded))
+        self.assertEqual(["inbox read"], degraded[0]["payload"]["commands"])
 
     def test_launch_transport_closure_records_a_degradation_not_a_failure(
         self,

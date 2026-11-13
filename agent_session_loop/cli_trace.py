@@ -5,7 +5,9 @@ names and option names — plus process facts (pid, timestamps, exit code). Raw
 argv, option values, positional values, unknown tokens, paths, environment
 values, message bodies, captured output, and exception messages are never
 assembled into a record, so the trace cannot leak content even if the state
-root is shared or archived.
+root is shared or archived. An uncaught exception contributes its class name and
+the ASL source location it was raised from (module, function, line), which is
+code vocabulary rather than content.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import fcntl
 import json
 import os
 import time
+import traceback
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -299,6 +302,32 @@ def read_corpus(root: str | Path) -> TraceCorpus:
 # ---------------------------------------------------------------------------
 
 
+_PACKAGE_DIR = Path(__file__).resolve().parent
+
+
+def exception_site(exception: BaseException | None) -> str | None:
+    """Name the innermost ASL frame ``exception`` passed through, or None.
+
+    Rendered as ``<module>.<function>:<line>`` (``plans_snapshot.inspect_plan:143``)
+    from the traceback alone: the exception's message, its arguments, and every
+    local are left out, so the site is as content-free as the class name. A
+    frame outside this package (the standard library, a dependency) is skipped,
+    because the useful answer is which ASL line to open, and a traceback that
+    never entered the package names nothing.
+    """
+    if exception is None:
+        return None
+    site: str | None = None
+    with suppress(Exception):
+        for frame in traceback.extract_tb(exception.__traceback__):
+            path = Path(frame.filename).resolve()
+            if not path.is_relative_to(_PACKAGE_DIR):
+                continue
+            module = ".".join(path.relative_to(_PACKAGE_DIR).with_suffix("").parts)
+            site = f"{module}.{frame.name}:{frame.lineno}"
+    return site
+
+
 _current_invocation_id: str | None = None
 
 
@@ -341,6 +370,7 @@ class Invocation:
                 "exception_type": (
                     None if exception is None else type(exception).__name__
                 ),
+                "exception_site": exception_site(exception),
             }
         )
         _write(self.root, record, prune=True)

@@ -42,6 +42,7 @@ RECENT_FAILURE_FIELDS = (
     "exit_code",
     "duration_ms",
     "exception_type",
+    "exception_site",
 )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -89,6 +90,11 @@ def _run_turn() -> int:
     stderr_text = os.environ.get("FAKE_CODEX_STDERR_TEXT")
     if stderr_text is not None:
         print(stderr_text, end="", file=sys.stderr, flush=True)
+    # A shell command the worker runs, in the worker's own environment: how a
+    # test makes the worker call `asl inbox read` the way a real one does.
+    worker_command = os.environ.get("FAKE_CODEX_WORKER_COMMAND_JSON")
+    if worker_command:
+        subprocess.run(json.loads(worker_command), check=False)
 
     spark_failure = os.environ.get("FAKE_CODEX_SPARK_FAILURE")
     if _arg_value("--model") == "gpt-5.3-codex-spark" and spark_failure:

@@ -92,6 +92,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.config",
         "agent_session_loop.contracts",
         "agent_session_loop.control_cli",
+        "agent_session_loop.control_plane_failures",
         "agent_session_loop.control_queue",
         "agent_session_loop.control_queue_drain",
         "agent_session_loop.control_queue_fields",

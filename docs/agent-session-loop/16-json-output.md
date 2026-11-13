@@ -26,6 +26,7 @@ that key for them. `events.jsonl` records
 `conversation_continuation`, `redirect_continuation`,
 `turn_started`, `turn_heartbeat`, `action_required`,
 `turn_hang_suspected`, `turn_hang_cleared`, `harness_degraded`,
+`control_plane_degraded`,
 `turn_execution_finished`, `turn_handoff_correction`, `turn_rejected`,
 `session_reopened`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
@@ -55,6 +56,10 @@ The less self-describing names, one line each:
   crossed into, or retracted, a suspected hang for the active turn.
 - `harness_degraded`: the harness lost an auxiliary transport on the way up
   and ran the turn anyway; it carries no pause or failure reason.
+- `control_plane_degraded`: a worker's own `asl inbox read` (or `inbox
+  acknowledge`, `ask`, `notify`) failed during the turn; it carries the turn's
+  `control_plane_degradation` (marker, `failure_count`, `commands`, bounded
+  `failures`) and no pause or failure reason.
 - `commit_group_started` / `commit_group_updated` / `commit_group_finished`:
   a commit group's `phase` (`started`, an intermediate phase, `complete`),
   with the `group` record also upserted into run state.

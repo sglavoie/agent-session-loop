@@ -219,7 +219,8 @@ automation. `trace_root` and `retention_days` name where the records live and
 how long they survive, so a zeroed section is distinguishable from a missing
 one. Recent failures carry only the trace's own closed field set —
 `invocation_id`, `timestamp`, `command`, `options`, `help_depth`, `harness`,
-`origin`, `outcome`, `exit_code`, `duration_ms`, `exception_type` — so the
+`origin`, `outcome`, `exit_code`, `duration_ms`, `exception_type`,
+`exception_site` — so the
 diagnostic names the failing command surface without exposing what was typed.
 The reader tolerates a degraded corpus rather than failing. `records_read`
 counts every non-blank line the trace files hold and `records_ignored` counts

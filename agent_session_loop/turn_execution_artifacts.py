@@ -9,6 +9,7 @@ from typing import Any
 
 from . import (
     config,
+    control_plane_failures,
     durability,
     events,
     harness_failures,
@@ -297,6 +298,9 @@ def write_turn_artifacts(
     degradation = harness_failures.classify_harness_degradation(result)
     if degradation is not None:
         payload["harness_degradation"] = degradation.to_dict()
+    control_plane = control_plane_failures.turn_degradation(paths["artifact_dir"])
+    if control_plane is not None:
+        payload["control_plane_degradation"] = control_plane
     if live_turn.get("action_required") is not None:
         payload["action_required"] = live_turn["action_required"]
     if "harness_shutdown" in live_turn:

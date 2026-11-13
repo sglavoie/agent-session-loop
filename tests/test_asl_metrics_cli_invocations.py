@@ -410,6 +410,23 @@ class CliInvocationMetricsTests(unittest.TestCase):
 
         self.assertEqual({"bad", "usage", "sigint", "boom"}, reported)
 
+    def test_a_recent_exception_names_its_asl_site(self) -> None:
+        self._write(
+            days_ago=0,
+            lines=self._pair(
+                "boom",
+                hours_ago=1,
+                command_path=["inbox", "read"],
+                outcome=cli_trace.OUTCOME_EXCEPTION,
+                exit_code=None,
+                exception_site="plans_snapshot.inspect_plan:143",
+            ),
+        )
+
+        (failure,) = self._collect()["recent_failures"]
+
+        self.assertEqual("plans_snapshot.inspect_plan:143", failure["exception_site"])
+
     def test_the_excluded_invocation_is_dropped_entirely(self) -> None:
         self._write(
             days_ago=0,
