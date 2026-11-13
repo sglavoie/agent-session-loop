@@ -179,6 +179,15 @@ Rules the answer must satisfy:
   `model_projection` is authoritative for the effective model. An unresolved
   requested default beside a resolved effective role model is not a
   contradiction.
+- A `review_cycles` record keeps three repair lists apart. `repair_groups` and
+  `repair_session_ids` name only the children the cycle kept on disk;
+  `withdrawn_repair_groups` names children it authored and then rolled back;
+  `declared_repair_groups` is the verdict's own grouping (group and finding
+  ids, no session id), recorded even when planning failed before any child
+  existed, such as on the repair-group cap. An empty `repair_groups` beside a
+  populated `declared_repair_groups` is that accounting working, not lost
+  groups. A cycle whose verdict passed repair validation but whose record
+  carries none of these lists' groups is still a defect.
 - A verification with `passed: false` is never a pass. It may carry an explicit
   `findings-defer-broad-failures` acceptance only when every deferred check is a
   `broad:*` replay under a valid findings verdict. Treat that deferral as

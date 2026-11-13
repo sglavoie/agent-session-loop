@@ -160,6 +160,25 @@ def _record_review_cycle(
         persistence.write_state(payload)
 
 
+def _declared_repair_groups(
+    findings: tuple[dict[str, Any], ...],
+) -> list[dict[str, Any]]:
+    """Return the verdict's repair groups in first-appearance order.
+
+    This is the grouping the review declared, not a plan of children: it names
+    each group and the findings in it, and no repair session id.
+    """
+    return [
+        {
+            "repair_group": group,
+            "finding_ids": [str(finding.get("id")) for finding in group_findings],
+        }
+        for group, group_findings in review_repair.group_findings_by_repair_group(
+            findings
+        )
+    ]
+
+
 def _advance_review_cycle(
     *,
     event_path: Path,
@@ -262,6 +281,15 @@ def _advance_review_cycle(
         snapshot.plan_dir,
         review_session_id=session_id,
     )
+    declared_repair_groups = _declared_repair_groups(planning.validated_findings)
+    if declared_repair_groups:
+        # ASI-147: the verdict's own grouping, recorded whether or not planning
+        # went on to specify children. A cap or conflict refusal fails planning
+        # before any child exists, so neither ``repair_groups`` (what the cycle
+        # materialized) nor ``withdrawn_repair_groups`` (what it authored and
+        # took back) can carry it. These entries name no child session, so
+        # ``review_continuation.repair_group_attempts()`` never counts them.
+        cycle_record["declared_repair_groups"] = declared_repair_groups
     if planning.ok and planning.reason == review_repair.REVIEW_REPAIR_REASON_OK:
         historical_attempts = review_continuation.repair_group_attempts(
             event_path, snapshot

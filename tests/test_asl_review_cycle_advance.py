@@ -11,6 +11,7 @@ from agent_session_loop import (
     plans_snapshot,
     review_continuation,
     review_cycle,
+    review_repair,
     review_session_body,
     run_persistence,
     session_verification,
@@ -190,6 +191,113 @@ class ReviewCycleAdvanceTests(RepairCycleFixtures, unittest.TestCase):
         self.assertNotIn("withdrawn_repair_groups", cycle)
         self.assertNotIn("withdrawn_repair_session_ids", cycle)
         self.assertNotIn("repair_children_rolled_back", cycle)
+
+    def test_a_group_cap_refusal_records_the_declared_groups(self) -> None:
+        """ASI-147: planning that fails on the group cap keeps the grouping."""
+        cap = review_repair.MAX_REPAIR_GROUPS
+        findings = [
+            _structured_review_finding(
+                finding_id=f"F{index}", repair_group=f"group-{index}"
+            )
+            for index in range(1, cap + 2)
+        ]
+        # One more finding in an existing group: grouping is by group, not by
+        # finding, and the record has to say which findings share a group.
+        findings.append(
+            _structured_review_finding(finding_id="F99", repair_group="group-1")
+        )
+        write_completed_review_plan(self.plan_dir, findings)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        event_path = self.state_dir / "events.jsonl"
+        payload: dict[str, Any] = {
+            "run_id": "run-1",
+            "run_dir": str(self.tmp_path / "run"),
+            "review_cycles": [],
+        }
+        turn_payload = {
+            "review_verdict": {
+                "passed": True,
+                "outcome": "findings",
+                "total_findings": len(findings),
+                "findings": findings,
+            }
+        }
+
+        action, _after = review_cycle._advance_review_cycle(
+            event_path=event_path,
+            payload=payload,
+            persistence=run_persistence._RunPersistence(),
+            args=argparse.Namespace(
+                state_dir=str(self.state_dir), allow_not_loop_ready=False
+            ),
+            cwd=self.repo_root,
+            session_id="2",
+            session_label="session 2",
+            session_details={"session": "2"},
+            snapshot=plans_snapshot.inspect_plan(self.plan_dir),
+            turn_payload=turn_payload,
+            max_review_fix_cycles=2,
+            plan_cache=plans_snapshot.PlanSnapshotCache(),
+            reinspect=session_verification._reinspect_after_plan_mutation,
+        )
+
+        self.assertEqual("paused", action)
+        self.assertEqual("malformed-review-repair", payload["pause_reason"])
+        self.assertIn(
+            f"{cap + 1} repair groups exceed the maximum of {cap}",
+            payload["pause_message"],
+        )
+        cycle = payload["review_cycles"][-1]
+        # Nothing was planned or materialized, and the record still says so.
+        self.assertEqual([], cycle["repair_groups"])
+        self.assertEqual([], cycle["repair_session_ids"])
+        self.assertNotIn("withdrawn_repair_groups", cycle)
+        # The verdict's own grouping survives beside that, so the record agrees
+        # with the pause about how many groups the review declared.
+        declared = cycle["declared_repair_groups"]
+        self.assertEqual(cap + 1, len(declared))
+        self.assertEqual(
+            [f"group-{index}" for index in range(1, cap + 2)],
+            [group["repair_group"] for group in declared],
+        )
+        self.assertEqual(["F1", "F99"], declared[0]["finding_ids"])
+        self.assertTrue(all("repair_session_id" not in group for group in declared))
+        recorded = [
+            record["payload"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.REVIEW_CYCLE_EVENT
+        ][-1]
+        self.assertEqual(declared, recorded["declared_repair_groups"])
+        # Declared groups name no child, so they spend no group's retry budget.
+        self.assertEqual(
+            {},
+            review_continuation.repair_group_attempts(
+                event_path, plans_snapshot.inspect_plan(self.plan_dir)
+            ),
+        )
+
+    def test_a_materialized_cycle_also_records_its_declared_groups(self) -> None:
+        """The declared grouping is recorded on every cycle that reaches planning."""
+        _action, _after, payload, event_path = self._advance_blocked_review_cycle(
+            allow_not_loop_ready=True
+        )
+
+        cycle = payload["review_cycles"][-1]
+        self.assertEqual(
+            [
+                {
+                    "repair_group": group["repair_group"],
+                    "finding_ids": group["finding_ids"],
+                }
+                for group in cycle["repair_groups"]
+            ],
+            cycle["declared_repair_groups"],
+        )
+        # One attempt for the one child that landed, not two.
+        self.assertEqual(
+            {cycle["repair_groups"][0]["repair_group"]: 1},
+            review_continuation.repair_group_attempts(event_path),
+        )
 
     def test_allow_not_loop_ready_keeps_projecting_the_materialized_children(
         self,
