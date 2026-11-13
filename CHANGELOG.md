@@ -34,6 +34,11 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- The supervisor audit's `commit-after-verification` check no longer reports
+  a head move the turn's own write guard caught as an out-of-scope violation as
+  commits the refused turn kept: the writer of a caught move is unknown, and
+  whether the catch held is `scope-escape`'s question. Replaying the stored
+  corpus moves exactly four runs from fail to pass, each an external writer.
 - A run whose lock file went missing is no longer declared abandoned while it
   is still heartbeating. `asl status` and lock takeover now also require every
   in-flight turn, verification and finalization heartbeat to be older than the

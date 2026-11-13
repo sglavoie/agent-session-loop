@@ -186,6 +186,10 @@ class CommitObservabilityTests(RunHistoryFixture, unittest.TestCase):
             self.assertEqual("pass", mutation.status, mutation.detail)
             self.assertIn("guard refused", mutation.detail)
             self.assertIn("turn-0001-01 in other", mutation.detail)
+            # The same caught move is not a commit the refused turn kept: its
+            # writer is unknown (runs 88874, 87479, 16653).
+            after = results["commit-after-verification"]
+            self.assertEqual("pass", after.status, after.detail)
 
     def test_a_refused_continuation_turn_that_moved_nothing_is_not_a_head_move(
         self,

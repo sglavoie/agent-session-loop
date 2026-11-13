@@ -49,18 +49,7 @@ def _guard_caught_repositories(context: _CheckContext) -> set[tuple[str, str]]:
     for turn in context.turns:
         result = audit_evidence_helpers._mapping(turn.get("result"))
         guard = audit_evidence_helpers._mapping(result.get("workspace_write_guard"))
-        if not guard or guard.get("passed") is True:
-            continue
-        for raw in audit_evidence_helpers._sequence(guard.get("violations")):
-            violation = audit_evidence_helpers._mapping(raw)
-            alias = violation.get("alias")
-            repository = violation.get("repository")
-            if not isinstance(alias, str) or not alias:
-                if not isinstance(repository, str) or not repository:
-                    continue
-                alias = audit_evidence_commits._declared_repository_alias(
-                    guard, repository
-                )
+        for alias in _guard_violation_aliases(guard):
             caught.add((str(turn.get("name")), alias))
     return caught
 
@@ -250,6 +239,41 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
     )
 
 
+def _guard_violation_aliases(guard: Mapping[str, Any]) -> set[str]:
+    """The repository aliases one refused guard recorded violations for."""
+    if not guard or guard.get("passed") is True:
+        return set()
+    aliases: set[str] = set()
+    for raw in audit_evidence_helpers._sequence(guard.get("violations")):
+        violation = audit_evidence_helpers._mapping(raw)
+        alias = violation.get("alias")
+        repository = violation.get("repository")
+        if not isinstance(alias, str) or not alias:
+            if not isinstance(repository, str) or not repository:
+                continue
+            alias = audit_evidence_commits._declared_repository_alias(guard, repository)
+        aliases.add(alias)
+    return aliases
+
+
+def _guard_caught_keys(guard: Mapping[str, Any]) -> set[str]:
+    """The ``changed`` keys whose repository this guard refused as a violation.
+
+    A caught write's writer is unknown -- the guard sees that a repository
+    outside the session's scope moved, not who moved it -- and whether the
+    catch held is ``scope-escape``'s question. So a head move there is not a
+    commit the refused turn kept (ASI-117, ASI-166).
+    """
+    aliases = _guard_violation_aliases(guard)
+    if not aliases:
+        return set()
+    return {
+        str(key)
+        for key in audit_evidence_helpers._mapping(guard.get("changed"))
+        if audit_evidence_commits._declared_repository_alias(guard, str(key)) in aliases
+    }
+
+
 def _worker_commits_added(guard: Mapping[str, Any]) -> list[str] | None:
     """Name what a worker turn put on HEAD, or ``None`` if that is unreadable.
 
@@ -265,15 +289,16 @@ def _worker_commits_added(guard: Mapping[str, Any]) -> list[str] | None:
     overstate one of them.
     """
     added: list[str] = []
-    external = _external_change_keys(guard)
+    external = _external_change_keys(guard) | _guard_caught_keys(guard)
     for key, raw_changes in audit_evidence_helpers._mapping(
         guard.get("changed")
     ).items():
         changes = audit_evidence_helpers._mapping(raw_changes)
         if changes.get("head_changed") is not True:
             continue
-        # A repository declared for external changes moved under a writer the
-        # guard cannot name, so its commits are not the refused turn's (ASI-166).
+        # A repository declared for external changes, or one the guard caught
+        # as an out-of-scope violation, moved under a writer the guard cannot
+        # name, so its commits are not the refused turn's (ASI-166, ASI-117).
         if str(key) in external:
             continue
         transition = audit_evidence_helpers._mapping(changes.get("head_transition"))
