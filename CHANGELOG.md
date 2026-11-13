@@ -69,6 +69,19 @@ A polish and hardening round after the public release.
   verification repair (ASI-168). The run records a digest of each path when it
   can attest it and sanctions the path only while the digest still matches, so
   later edits, unrecorded paths and unrelated work still refuse.
+- Supervisor audit: a HEAD move in a repository declared with
+  `--allow-external-changes` is no longer counted as the worker's commit by the
+  mutation-and-commit or commit-after-verification checks, and a HEAD move the
+  write guard itself refused is no longer reported as a guard gap. A refused
+  turn that carries a write-guard record now counts as guarded, so a run whose
+  only turn was refused no longer reads as unguarded.
+- Supervisor audit: a write-scope catch reports what changed during the turn
+  with an unknown writer instead of saying the session wrote it, and its
+  recommendation offers `asl acknowledge-external-changes` for a concurrent
+  writer's change as well as widening scope for the session's own.
+- A `commit-preflight` pause names the repository the gate refused under
+  `pause_details.refused_repository`, and a continuation's remediation inspects
+  that checkout and no longer presents the dirt as predating the run.
 - Copilot preparation and audit turns adapt to the remote-option change in
   CLI 1.0.103 while retaining their read-only restrictions. Lifecycle acceptance
   disables Copilot updates, refuses to verify a version that changes during the
