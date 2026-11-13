@@ -147,6 +147,58 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         self.assertNotIn("src/alpha.py", self.porcelain())
         self.assertNotIn("src/beta.py", self.recorded_turn()["prompt"])
 
+    def test_pathspec_commits_staged_and_worktree_deletions(self) -> None:
+        # ASI-165: a session's scope named a file its worker had already
+        # `git rm`ed, and every `asl commit --pathspec` attempt died in `git
+        # add` ("did not match any files"). A plain worktree deletion beside it
+        # must commit as a deletion too, and an unrelated edit stays unstaged.
+        for name in ("src/link.swift", "src/plain.swift", "src/other.py"):
+            self.write(name, f"{name}\n")
+        git_stdout(self.repo, "add", "-A")
+        git_stdout(self.repo, "commit", "-qm", "seed")
+        git_stdout(self.repo, "rm", "-q", "src/link.swift")
+        (self.repo / "src/plain.swift").unlink()
+        self.write("src/alpha.py", "print('alpha')\n")
+        self.write("src/other.py", "unrelated\n")
+
+        code, _out, err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--pathspec",
+            "src/link.swift",
+            "--pathspec",
+            "src/plain.swift",
+            "--pathspec",
+            "src/alpha.py",
+        )
+
+        self.assertEqual(0, code, err)
+        committed = git_stdout(
+            self.repo, "show", "--name-status", "--format=", "HEAD"
+        ).splitlines()
+        self.assertEqual(
+            sorted(committed),
+            ["A\tsrc/alpha.py", "D\tsrc/link.swift", "D\tsrc/plain.swift"],
+        )
+        self.assertEqual(["M src/other.py"], self.porcelain().splitlines())
+
+    def test_pathspec_still_refuses_a_path_that_never_existed(self) -> None:
+        self.write("src/alpha.py", "print('alpha')\n")
+        before = self.commit_count()
+
+        code, _out, err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--pathspec",
+            "src/alpha.py",
+            "--pathspec",
+            "src/never.swift",
+        )
+
+        self.assertEqual(1, code)
+        self.assertIn("did not match any files", err)
+        self.assertEqual(before, self.commit_count())
+
     def test_pathspec_does_not_commit_post_capture_edits(self) -> None:
         # An edit landing during the generation turn leaves the worktree
         # describing something the message was never written from, so the run
