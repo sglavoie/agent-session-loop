@@ -101,6 +101,22 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed
 
 
+_HEARTBEATING_STATE_KEYS = ("active_turn", "active_verification", "active_finalization")
+
+
+def _newest_heartbeat(state_obj: dict[str, Any]) -> datetime | None:
+    """The latest ``last_heartbeat_at`` any in-flight phase of the run recorded."""
+    newest: datetime | None = None
+    for key in _HEARTBEATING_STATE_KEYS:
+        phase = state_obj.get(key)
+        if not isinstance(phase, dict):
+            continue
+        beat = _parse_timestamp(phase.get("last_heartbeat_at"))
+        if beat is not None and (newest is None or beat > newest):
+            newest = beat
+    return newest
+
+
 def _unfinished_run_id(state_obj: dict[str, Any] | None) -> str | None:
     """Return the run id of a state that recorded a start but never a finish."""
     if not isinstance(state_obj, dict):
@@ -131,6 +147,18 @@ def _abandonment_is_proven(
             return False
         age_seconds = (datetime.now(UTC) - started_at).total_seconds()
         if age_seconds < ABANDONED_NO_LOCK_GRACE_SECONDS:
+            return False
+        # A missing lock is not death while the run is still heartbeating: a
+        # live runner whose lock was wrongly reclaimed (run 86211, ASI-4) kept
+        # writing state, and each `asl status` appended another synthetic
+        # `run_finished` behind it. Only a run silent past the same grace is
+        # proven dead.
+        beat = _newest_heartbeat(state_obj)
+        if (
+            beat is not None
+            and (datetime.now(UTC) - beat).total_seconds()
+            < ABANDONED_NO_LOCK_GRACE_SECONDS
+        ):
             return False
         # A booting runner writes state.json before its lock, so re-read the
         # lock rather than trusting a snapshot taken before that gap closed.

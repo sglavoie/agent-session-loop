@@ -265,6 +265,45 @@ class MarkRunAbandonedTests(MarkRunAbandonedTestsBase):
         )
         self.assertIsNone(self.persisted_state()["abandoned"]["lock_reason"])
 
+    def test_missing_lock_never_abandons_a_run_still_heartbeating(self) -> None:
+        # ASI-4 (run 86211): a live runner whose lock was wrongly reclaimed
+        # kept heartbeating, and every status read wrote another synthetic
+        # terminal record behind it.
+        for phase in ("active_turn", "active_verification", "active_finalization"):
+            with self.subTest(phase=phase):
+                self.write_unfinished_state()
+                state = self.persisted_state()
+                state[phase] = {
+                    "session": 1,
+                    "turn_index": 1,
+                    "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                }
+                self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+                self.assertFalse(
+                    state_abandonment.mark_run_abandoned(
+                        self.plan_state, lock_info=None, trigger="test"
+                    )
+                )
+                self.assertIsNone(self.persisted_state()["run_finished_at"])
+                self.assertFalse(self.events_path.exists())
+
+    def test_missing_lock_abandons_a_run_whose_heartbeat_went_silent(self) -> None:
+        self.write_unfinished_state()
+        state = self.persisted_state()
+        state["active_turn"] = {
+            "session": 1,
+            "turn_index": 1,
+            "last_heartbeat_at": "2026-06-19T12:05:00+00:00",
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        self.assertTrue(
+            state_abandonment.mark_run_abandoned(
+                self.plan_state, lock_info=None, trigger="test"
+            )
+        )
+
     def test_missing_lock_defers_to_a_lock_that_reappeared(self) -> None:
         self.write_unfinished_state()
         self.write_lock(pid=os.getpid(), hostname=socket.gethostname())

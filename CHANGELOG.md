@@ -34,6 +34,11 @@ A polish and hardening round after the public release.
 
 ### Fixed
 
+- A run whose lock file went missing is no longer declared abandoned while it
+  is still heartbeating. `asl status` and lock takeover now also require every
+  in-flight turn, verification and finalization heartbeat to be older than the
+  no-lock grace, so a live runner can no longer collect a synthetic
+  `run_finished` on each status read (ASI-4, run 86211).
 - A Claude turn whose background-task follow-up also answered guidance
   delivered mid-follow-up no longer hangs after its last result. The follow-up
   result now settles guidance the CLI echoed, so stdin closes and the CLI
