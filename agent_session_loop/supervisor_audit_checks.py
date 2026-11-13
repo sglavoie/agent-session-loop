@@ -163,8 +163,14 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             invariant_key="packet.write-scope-guard-catch",
             severity="medium",
             recommendation=(
-                "Widen the child's durable write scope to the aliases its own "
-                "findings name, rerun expansion and preflight, then resume."
+                "Establish who made the change first: the guard cannot tell the "
+                "session from a concurrent writer. If the session's own work "
+                "needed it, widen the child's durable write scope to the aliases "
+                "its own findings name, rerun expansion and preflight, then "
+                "resume. If someone else changed the repository, record it with "
+                "`asl acknowledge-external-changes` (or rerun with "
+                "--allow-external-changes for that alias) instead of widening "
+                "scope."
             ),
         ),
         _check_scope_guard_catch,

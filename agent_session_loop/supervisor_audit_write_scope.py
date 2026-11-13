@@ -315,7 +315,14 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
         offenders.items(), key=lambda item: item[0] or ""
     ):
         who = f"session {session}" if session is not None else "an unnamed session"
-        claim = f"{who} wrote outside its declared scope ({_names(offending_aliases)})"
+        # The guard compares snapshots taken around the turn, so it knows what
+        # changed while the session ran and never who changed it. Saying the
+        # session "wrote" there convicted it of edits a concurrent operator or
+        # agent made in a registered repository (ASI-140).
+        claim = (
+            f"{_names(offending_aliases)} changed outside {who}'s declared "
+            "scope during its turn (writer unknown)"
+        )
         # A commit naming the offending session cannot predate the guard, which
         # runs after the turn it judges, so its presence says the run carried
         # the out-of-scope write forward instead of holding it. The commit must
@@ -374,8 +381,8 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
             escaped.append(f"{claim} and {', '.join(note for _, note in missing)}")
         else:
             caught.append(
-                f"{claim}, and the guard reverted it to pending and paused the "
-                "run before anything was committed"
+                f"{claim}, and the guard reverted the session to pending and "
+                "paused the run before anything was committed"
             )
 
     return _WriteScopeAnalysis(

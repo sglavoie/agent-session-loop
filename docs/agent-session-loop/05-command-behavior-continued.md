@@ -469,9 +469,13 @@ paused on a scope violation is a working guard rather than a leak. Two checks
 share one reading of the same evidence and one lane.
 `packet.write-scope-containment` is critical and owns only the writes that got
 past the guard; `packet.write-scope-guard-catch` is medium and owns the ones it
-stopped, recommending that the child's durable write scope be widened to the
-aliases its own findings name before expansion and preflight are rerun and the
-run resumed. A write counts as caught only when the guard recorded the
+stopped. The guard compares snapshots, so it reports what changed during a
+session's turn with an unknown writer rather than claiming the session wrote
+it, and its recommendation asks who made the change first: the session's own
+work widens the child's durable write scope to the aliases its own findings
+name before expansion and preflight are rerun and the run resumed, while a
+concurrent writer's change is recorded with `asl acknowledge-external-changes`
+(or `--allow-external-changes`) instead. A write counts as caught only when the guard recorded the
 violation, reverted the session to pending, paused the run on that guard record,
 and no commit that could have carried the write followed; anything weaker is an
 escape, including a `workspace-write-scope-repair` whose own guard evidence still

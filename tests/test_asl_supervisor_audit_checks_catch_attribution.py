@@ -481,7 +481,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             self.assertIn("session 1", results["scope-guard-catch"].detail)
             self.assertNotIn("an unnamed session", results["scope-guard-catch"].detail)
             self.assertEqual(
-                1, results["scope-guard-catch"].detail.count("wrote outside")
+                1, results["scope-guard-catch"].detail.count("changed outside")
             )
             self.assertEqual("pass", results["scope-escape"].status)
 
@@ -519,14 +519,14 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             # bundle's commit evidence cannot support.
             escape = results["scope-escape"]
             self.assertEqual("fail", escape.status)
-            self.assertEqual(1, escape.detail.count("wrote outside"))
+            self.assertEqual(1, escape.detail.count("changed outside"))
             self.assertIn("an unnamed session", escape.detail)
             self.assertIn("docs", escape.detail)
             self.assertIn("cannot be ruled out", escape.detail)
             self.assertNotIn("notes", escape.detail)
             caught = results["scope-guard-catch"]
             self.assertEqual("fail", caught.status)
-            self.assertEqual(1, caught.detail.count("wrote outside"))
+            self.assertEqual(1, caught.detail.count("changed outside"))
             self.assertIn("session 1", caught.detail)
             self.assertIn("notes", caught.detail)
             self.assertNotIn("docs", caught.detail)
@@ -574,7 +574,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             # pins is that they stay two.
             caught = results["scope-guard-catch"]
             self.assertEqual("fail", caught.status)
-            self.assertEqual(2, caught.detail.count("wrote outside"))
+            self.assertEqual(2, caught.detail.count("changed outside"))
             self.assertIn("an unnamed session", caught.detail)
             self.assertIn("session 1", caught.detail)
             self.assertEqual("pass", results["scope-escape"].status)

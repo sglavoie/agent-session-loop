@@ -378,6 +378,37 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                 ],
             )
 
+    def test_a_caught_change_names_no_writer_and_offers_external_recovery(
+        self,
+    ) -> None:
+        # The guard compares snapshots, so a change in a registered repository
+        # during the turn may be a concurrent operator's or agent's. The finding
+        # must not convict the session, and its recommendation must offer the
+        # external-change recovery rather than only widening scope (ASI-140).
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+
+            _, results = self._audit(history)
+
+            detail = results["scope-guard-catch"].detail
+            self.assertIn(
+                "docs changed outside session 01's declared scope during its "
+                "turn (writer unknown)",
+                detail,
+            )
+            self.assertNotIn("wrote", detail)
+            self.assertIn("reverted the session to pending", detail)
+            [caught] = [
+                finding
+                for finding in supervisor_audit_checks.findings_from_results(
+                    results.values()
+                )
+                if finding.invariant_key == "packet.write-scope-guard-catch"
+            ]
+            self.assertIn("asl acknowledge-external-changes", caught.recommendation)
+            self.assertIn("concurrent writer", caught.recommendation)
+
     def test_one_caught_write_is_reported_once_across_turn_and_pause(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
@@ -386,7 +417,7 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
             _, results = self._audit(history)
 
             self.assertEqual(
-                1, results["scope-guard-catch"].detail.count("wrote outside")
+                1, results["scope-guard-catch"].detail.count("changed outside")
             )
 
     def test_a_violation_the_run_never_reverted_still_escaped(self) -> None:
