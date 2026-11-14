@@ -1,5 +1,14 @@
 # Agent Session Loop (ASL)
 
+`asl baseline --per-check-timeout SECONDS` replaces the default 120-second
+baseline cap, while each command remains bounded by its contract timeout.
+The inferred total sums the effective budgets of distinct checks and remains
+capped at 600 seconds. For longer suites, supply both limits, for example
+`--per-check-timeout 3600 --total-timeout 7200`. Explicit smaller limits still
+shorten checks, and every check is bounded by the remaining total budget.
+These options change execution budgets, not baseline expectations or completion
+checks; recorded evidence remains available to ordinary preflight.
+
 Copilot audit argv adapts to the remote-option change in CLI 1.0.103: newer
 prompt-mode turns use `--sync-session=off`, while earlier or unknown versions
 keep `--no-remote --no-remote-export`. The adapter reprobes before each audit

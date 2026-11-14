@@ -42,10 +42,9 @@ from .verification_models import (
 def _per_check_budget(
     check: VerificationCheck, per_check_timeout: float | None
 ) -> float:
-    budget = contracts.baseline_check_budget_seconds(check)
-    if per_check_timeout is not None:
-        budget = min(budget, float(per_check_timeout))
-    return budget
+    return contracts.baseline_check_budget_seconds(
+        check, per_check_timeout=per_check_timeout
+    )
 
 
 def _clamp_command_timeout(
@@ -70,8 +69,9 @@ def run_baseline(
     """Execute the plan's baseline checks and record outcomes into the cache.
 
     Checks are deduplicated by :func:`baseline_identity_key`, run under a
-    per-check budget clamped to :data:`contracts.DEFAULT_BASELINE_CHECK_BUDGET_SECONDS`
-    (or ``per_check_timeout`` when smaller) and further clamped to the remaining
+    per-check budget capped by ``per_check_timeout`` when supplied, otherwise
+    :data:`contracts.DEFAULT_BASELINE_CHECK_BUDGET_SECONDS`, without extending
+    a command's contract timeout. Each check is further clamped to the remaining
     total budget, and stopped once the cumulative wall-clock exceeds the total
     budget (remaining checks record as ``skip``). The total budget is a
     fail-closed gate: a check whose execution crosses it records an unsatisfied
@@ -137,7 +137,8 @@ def run_baseline(
         # Budgeted over the checks that will run: a check two sessions share
         # executes once, so it must not earn the total budget twice.
         else contracts.recipe_total_budget_seconds(
-            VerifyRecipe(checks=tuple(check for _, check, _, _ in resolved_checks))
+            VerifyRecipe(checks=tuple(check for _, check, _, _ in resolved_checks)),
+            per_check_timeout=per_check_timeout,
         )
     )
     recorded_at = now or datetime.now(UTC).isoformat()

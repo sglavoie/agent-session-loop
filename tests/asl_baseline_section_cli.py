@@ -196,6 +196,76 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
 
 
 class BaselineCliTests(unittest.TestCase):
+    def test_explicit_timeout_replaces_default_cap_and_records_usable_evidence(self):
+        from agent_session_loop import preflight
+
+        cases = (
+            (900, (), 120, 120),
+            (900, ("--per-check-timeout", "300"), 300, 300),
+            (240, ("--per-check-timeout", "300"), 240, 240),
+            (900, ("--per-check-timeout", "50"), 50, 50),
+            (900, ("--per-check-timeout", "900"), 600, 600),
+            (
+                3600,
+                ("--per-check-timeout", "3600", "--total-timeout", "7200"),
+                3600,
+                7200,
+            ),
+            (
+                900,
+                ("--per-check-timeout", "300", "--total-timeout", "150"),
+                150,
+                150,
+            ),
+        )
+        for contract_timeout, extra, check_budget, total_budget in cases:
+            with (
+                self.subTest(extra=extra, contract_timeout=contract_timeout),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                plan_dir = Path(tmp) / "plan"
+                repo_root = Path(tmp) / "repo"
+                repo_root.mkdir()
+                write_plan(
+                    plan_dir,
+                    ("pending",),
+                    contracts_by_id={
+                        "1": _contract_block(
+                            json.dumps(
+                                {
+                                    "type": "command",
+                                    "argv": [sys.executable, "-c", "pass"],
+                                    "timeout_seconds": contract_timeout,
+                                    "baseline_expectation": "pass",
+                                }
+                            )
+                        )
+                    },
+                )
+
+                completed = self._run_baseline(plan_dir, repo_root, extra=extra)
+
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                payload = json.loads(completed.stdout)
+                self.assertEqual(total_budget, payload["total_budget_seconds"])
+                check = payload["checks"][0]
+                self.assertEqual(check_budget, check["budget_seconds"])
+                cache = baseline_cache.BaselineCache.load(
+                    plan_dir / baseline_cache.BASELINE_RESULTS_FILENAME
+                )
+                self.assertEqual(
+                    check_budget, cache.get(check["key"]).result["budget_seconds"]
+                )
+                report = preflight.run_preflight(plan_dir, cwd=repo_root)
+                self.assertEqual(
+                    [],
+                    [
+                        finding
+                        for finding in report.findings
+                        if finding.category.startswith("baseline-")
+                    ],
+                )
+
     def _run_baseline(
         self,
         plan_dir: Path,

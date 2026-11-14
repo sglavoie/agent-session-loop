@@ -208,24 +208,36 @@ def parse_completion_contract(
     )
 
 
-def baseline_check_budget_seconds(check: VerificationCheck) -> float:
+def baseline_check_budget_seconds(
+    check: VerificationCheck, *, per_check_timeout: float | None = None
+) -> float:
     """Return the per-check baseline execution budget, in seconds.
 
-    Command checks are clamped to :data:`DEFAULT_BASELINE_CHECK_BUDGET_SECONDS`
-    so a generous per-session timeout cannot exceed the baseline budget. File
-    and regex checks have no command timeout and use the full check budget.
+    The explicit limit replaces the default baseline cap, but never extends a
+    command's contract timeout. File and regex checks have no command timeout
+    and use the full check budget.
     """
-    timeout = getattr(check, "timeout_seconds", DEFAULT_BASELINE_CHECK_BUDGET_SECONDS)
-    return min(float(timeout), DEFAULT_BASELINE_CHECK_BUDGET_SECONDS)
+    limit = (
+        DEFAULT_BASELINE_CHECK_BUDGET_SECONDS
+        if per_check_timeout is None
+        else float(per_check_timeout)
+    )
+    timeout = getattr(check, "timeout_seconds", limit)
+    return min(float(timeout), limit)
 
 
-def recipe_total_budget_seconds(recipe: VerifyRecipe) -> float:
+def recipe_total_budget_seconds(
+    recipe: VerifyRecipe, *, per_check_timeout: float | None = None
+) -> float:
     """Return the total baseline budget for a recipe, in seconds.
 
     The sum of per-check budgets is clamped to
     :data:`DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS`.
     """
-    total = sum(baseline_check_budget_seconds(check) for check in recipe.checks)
+    total = sum(
+        baseline_check_budget_seconds(check, per_check_timeout=per_check_timeout)
+        for check in recipe.checks
+    )
     return min(float(total), DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS)
 
 

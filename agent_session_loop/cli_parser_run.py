@@ -412,9 +412,9 @@ def _add_check_commands(
         default=None,
         metavar="SECONDS",
         help=(
-            "Clamp each baseline check to this many seconds "
-            "(default: the contract budget, capped at "
-            f"{contracts.DEFAULT_BASELINE_CHECK_BUDGET_SECONDS:g}s)"
+            "Set the baseline per-check cap, without extending contract timeouts "
+            f"(default: {contracts.DEFAULT_BASELINE_CHECK_BUDGET_SECONDS:g}s; "
+            "an explicit value may raise or lower it)"
         ),
     )
     baseline_parser.add_argument(
@@ -426,7 +426,7 @@ def _add_check_commands(
         metavar="SECONDS",
         help=(
             "Stop running baseline checks once cumulative wall-clock exceeds "
-            "this many seconds (default: the summed contract budget, capped at "
+            "this many seconds (default: the summed effective check budgets, capped at "
             f"{contracts.DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS:g}s)"
         ),
     )
