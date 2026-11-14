@@ -8,7 +8,7 @@ asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--agent-mux] [--state-d
 asl harness-compat [--harness codex|claude|copilot ...] [--strict] [--json]
 asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
 asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--force-new] [--check] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
-asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--spark|--no-spark] [--validator-harness H] [--validator-model MODEL] [--validator-effort EFFORT] [--validator-jobs N] [--validator-timeout SEC] [--validator-heartbeat SEC] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--force-new] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--spark|--no-spark] [--validator-harness H] [--validator-model MODEL] [--validator-effort EFFORT] [--validator-jobs N] [--validator-timeout SEC] [--validator-heartbeat SEC] [--repair-rounds N] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--force-new] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl prepare --resume PLAN_DIR [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
 asl register-repositories (PLAN_DIR | --plan-file PATH | --inline-stdin) [--cwd ROOT] [--output PATH] [--state-dir DIR] [--json]

@@ -52,6 +52,7 @@ def _format_resume_command(
     review_harness: str | None,
     review_harness_model: str | None,
     rebind_workspace: bool = False,
+    repair_rounds: int | None = None,
 ) -> str:
     argv = [
         "asl",
@@ -85,4 +86,6 @@ def _format_resume_command(
         argv.extend(["--review-harness", review_harness])
     if review_harness_model:
         argv.extend(["--review-harness-model", review_harness_model])
+    if repair_rounds is not None:
+        argv.extend(["--repair-rounds", str(repair_rounds)])
     return shlex.join(argv)

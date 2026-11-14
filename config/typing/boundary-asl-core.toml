@@ -362,6 +362,7 @@ module = [
     "agent_session_loop.prepare_baseline",
     "agent_session_loop.prepare_cli",
     "agent_session_loop.prepare_commands",
+    "agent_session_loop.prepare_contract_repair",
     "agent_session_loop.prepare_corrections",
     "agent_session_loop.prepare_expand_ingest",
     "agent_session_loop.prepare_expansion",

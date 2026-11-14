@@ -14,6 +14,17 @@ A polish and hardening round after the public release.
 
 ### Added
 
+- `asl prepare` now repairs validator-reported completion-contract problems
+  itself instead of stopping on the first round. Each repair round is one
+  sandboxed turn of the validator harness that may edit only `context.md` and
+  the session files; ASL restores the plan and stops on any other change, a
+  codebase change, a changed handoff or an unparseable contract. Changed
+  sessions are then revalidated. The loop runs for at most `--repair-rounds`
+  rounds (default 2, `0` disables it), stops early when a round changes nothing
+  or the same problems return, and surfaces a question when a problem needs the
+  plan owner's decision. Rounds are recorded in `prepare-contract-repairs.json`;
+  the source plan file is not edited.
+
 - Opt-in live crash-recovery acceptance: SIGKILL the runner during a real
   session 2 tool after verified session 1 work, explicitly stop sampled
   predecessors, unlock the stale lock without force, and authorize a fresh

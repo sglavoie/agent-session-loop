@@ -6,6 +6,7 @@ import argparse
 
 from . import harnesses
 from .cli_defaults import (
+    _PREPARE_DEFAULT_REPAIR_ROUNDS,
     _PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
     _PREPARE_DEFAULT_VALIDATOR_JOBS,
     _PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS,
@@ -225,6 +226,18 @@ def _add_plan_authoring_commands(
         help=(
             "Seconds between validator progress heartbeats on stderr "
             f"(default: {_PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS})"
+        ),
+    )
+    prepare_parser.add_argument(
+        "--repair-rounds",
+        dest="repair_rounds",
+        metavar="N",
+        type=int,
+        default=_PREPARE_DEFAULT_REPAIR_ROUNDS,
+        help=(
+            "Repair rounds for validator-reported completion-contract problems "
+            "before preparation stops; 0 disables repair "
+            f"(default: {_PREPARE_DEFAULT_REPAIR_ROUNDS})"
         ),
     )
     prepare_parser.add_argument(

@@ -55,6 +55,7 @@ ISSUE_TYPES: tuple[str, ...] = (
 
 REPOSITORY_AMBIGUITY_ISSUE = "repository-ambiguous"
 CONTRACT_PROBLEM_CATEGORY = "contract-problem"
+CONTRACT_REPAIR_DECISION_CATEGORY = "contract-repair-decision"
 
 DEPENDENCY_DIRECTIONS: tuple[str, ...] = ("requires", "provides")
 

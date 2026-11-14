@@ -45,9 +45,18 @@ from .plans_files import canonicalize_path, read_input_text
 from .plans_snapshot import inspect_plan
 from .prepare_baseline import _run_baseline_stage
 from .prepare_commands import _format_resume_command, _format_run_command
+from .prepare_contract_repair import (
+    DEFAULT_CONTRACT_REPAIR_ROUNDS,
+    ContractRepairer,
+    ContractRepairPacket,
+    launch_contract_repair,
+    problem_signature,
+    run_contract_repair,
+)
 from .prepare_corrections import CorrectionOutcome
 from .prepare_models import (
     CONTRACT_PROBLEM_CATEGORY,
+    CONTRACT_REPAIR_DECISION_CATEGORY,
     CORRECTION_ALREADY_APPLIED,
     CORRECTION_APPLIED,
     CORRECTION_BLOCKED,
@@ -70,6 +79,7 @@ from .prepare_results import (
     PREPARE_STAGE_BASELINE,
     PREPARE_STAGE_CORRECTIONS,
     PREPARE_STAGE_PREFLIGHT,
+    PREPARE_STAGE_REPAIR,
     PREPARE_STAGE_STRUCTURE,
     PREPARE_STAGE_VALIDATION,
     PREPARE_STEP_FAILED,
@@ -118,6 +128,8 @@ def prepare_plan(
     unsafe_bypass: bool = True,
     state_dir: str | Path | None = None,
     rebind_workspace: bool = False,
+    repair_rounds: int = DEFAULT_CONTRACT_REPAIR_ROUNDS,
+    contract_repairer: ContractRepairer | None = None,
 ) -> PrepareResult:
     """Run the full preparation pipeline for one source plan (or resume one).
 
@@ -157,6 +169,26 @@ def prepare_plan(
             )
     else:
         selected_validator = validator
+    if repair_rounds < 0:
+        raise PlanError("repair rounds must be zero or more")
+    # The real repair harness pairs with the real validator. A caller that
+    # injects its own validator drives validation itself, so repair then runs
+    # only through a repairer it injects as well.
+    selected_repairer: ContractRepairer | None
+    if contract_repairer is not None:
+        selected_repairer = contract_repairer
+    elif validator is None:
+
+        def selected_repairer(packet: ContractRepairPacket) -> object:
+            return launch_contract_repair(
+                validator_harness,
+                packet,
+                model=validator_model,
+                effort=validator_effort,
+                timeout=validator_timeout,
+            )
+    else:
+        selected_repairer = None
 
     if rebind_workspace:
         if resume_plan_dir is None:
@@ -302,6 +334,9 @@ def prepare_plan(
         validator_heartbeat=validator_heartbeat,
         review_harness=review_harness,
         review_harness_model=review_harness_model,
+        repair_rounds=(
+            None if repair_rounds == DEFAULT_CONTRACT_REPAIR_ROUNDS else repair_rounds
+        ),
     )
 
     def _failed(
@@ -325,78 +360,170 @@ def prepare_plan(
             workspace=workspace_summary,
         )
 
-    try:
-        aggregate, newly_validated, corrections = _run_validation_stage(
-            plan_dir,
-            session_ids,
-            codebase_root=str(canonical_cwd),
-            validator=selected_validator,
-            batch_size=batch_size,
-            validator_harness=validator_harness,
-            validator_model=validator_model,
-            validator_effort=validator_effort,
-            validator_jobs=validator_jobs,
-            validator_heartbeat=validator_heartbeat,
-        )
-    except RepositoryRegistryRequiredError as error:
-        blockers.append(
-            PrepareBlocker(
-                stage=PREPARE_STAGE_VALIDATION,
-                category=repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED,
-                message=str(error),
+    repair_round = 0
+    previous_signature: frozenset[tuple[str, str]] | None = None
+    while True:
+        try:
+            aggregate, newly_validated, corrections = _run_validation_stage(
+                plan_dir,
+                session_ids,
+                codebase_root=str(canonical_cwd),
+                validator=selected_validator,
+                batch_size=batch_size,
+                validator_harness=validator_harness,
+                validator_model=validator_model,
+                validator_effort=validator_effort,
+                validator_jobs=validator_jobs,
+                validator_heartbeat=validator_heartbeat,
             )
-        )
-        steps.append(
-            PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, str(error))
-        )
-        return _failed(PREPARE_EXIT_REASON_REGISTRY_REQUIRED)
-    except (PlanError, harnesses.HarnessError) as error:
-        blockers.append(
-            PrepareBlocker(stage=PREPARE_STAGE_VALIDATION, message=str(error))
-        )
-        steps.append(
-            PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, str(error))
-        )
-        return _failed(PREPARE_EXIT_REASON_VALIDATION_FAILED)
-    ambiguity_findings = _repository_ambiguity_findings(aggregate)
-    if ambiguity_findings:
-        for session_id, issue in ambiguity_findings:
+        except RepositoryRegistryRequiredError as error:
             blockers.append(
                 PrepareBlocker(
                     stage=PREPARE_STAGE_VALIDATION,
-                    session_id=session_id,
-                    category=REPOSITORY_AMBIGUITY_ISSUE,
-                    message=issue.summary,
+                    category=repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED,
+                    message=str(error),
                 )
             )
-        detail = (
-            f"{len(ambiguity_findings)} ambiguous unqualified repository "
-            "path claim(s) require plan correction"
-        )
-        steps.append(PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, detail))
-        return _failed(PREPARE_EXIT_REASON_VALIDATION_FAILED, corrections=corrections)
-    contract_problem_findings = _contract_problem_findings(aggregate)
-    if contract_problem_findings:
-        for session_id, problem in contract_problem_findings:
+            steps.append(
+                PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, str(error))
+            )
+            return _failed(PREPARE_EXIT_REASON_REGISTRY_REQUIRED)
+        except (PlanError, harnesses.HarnessError) as error:
             blockers.append(
-                PrepareBlocker(
-                    stage=PREPARE_STAGE_VALIDATION,
-                    session_id=session_id,
-                    category=CONTRACT_PROBLEM_CATEGORY,
-                    message=f"{problem.message}: {problem.suggested_fix}",
+                PrepareBlocker(stage=PREPARE_STAGE_VALIDATION, message=str(error))
+            )
+            steps.append(
+                PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, str(error))
+            )
+            return _failed(PREPARE_EXIT_REASON_VALIDATION_FAILED)
+        ambiguity_findings = _repository_ambiguity_findings(aggregate)
+        if ambiguity_findings:
+            for session_id, issue in ambiguity_findings:
+                blockers.append(
+                    PrepareBlocker(
+                        stage=PREPARE_STAGE_VALIDATION,
+                        session_id=session_id,
+                        category=REPOSITORY_AMBIGUITY_ISSUE,
+                        message=issue.summary,
+                    )
+                )
+            detail = (
+                f"{len(ambiguity_findings)} ambiguous unqualified repository "
+                "path claim(s) require plan correction"
+            )
+            steps.append(
+                PrepareStep(PREPARE_STAGE_VALIDATION, PREPARE_STEP_FAILED, detail)
+            )
+            return _failed(
+                PREPARE_EXIT_REASON_VALIDATION_FAILED, corrections=corrections
+            )
+        contract_problem_findings = _contract_problem_findings(aggregate)
+        if (
+            contract_problem_findings
+            and selected_repairer is not None
+            and repair_round < repair_rounds
+        ):
+            signature = problem_signature(contract_problem_findings)
+            if signature != previous_signature:
+                previous_signature = signature
+                repair_round += 1
+                try:
+                    outcome = run_contract_repair(
+                        plan_dir,
+                        contract_problem_findings,
+                        codebase_root=canonical_cwd,
+                        round_number=repair_round,
+                        repairer=selected_repairer,
+                    )
+                except (PlanError, harnesses.HarnessError) as error:
+                    steps.append(
+                        PrepareStep(
+                            PREPARE_STAGE_REPAIR,
+                            PREPARE_STEP_FAILED,
+                            f"round {repair_round}: {error}",
+                        )
+                    )
+                else:
+                    if outcome.needs_decision:
+                        for decision in outcome.needs_decision:
+                            blockers.append(
+                                PrepareBlocker(
+                                    stage=PREPARE_STAGE_REPAIR,
+                                    session_id=decision.session_id,
+                                    category=CONTRACT_REPAIR_DECISION_CATEGORY,
+                                    message=decision.question,
+                                )
+                            )
+                        steps.append(
+                            PrepareStep(
+                                PREPARE_STAGE_REPAIR,
+                                PREPARE_STEP_FAILED,
+                                (
+                                    f"round {repair_round}: "
+                                    f"{len(outcome.needs_decision)} problem(s) "
+                                    "need the plan owner's decision"
+                                ),
+                            )
+                        )
+                        return _failed(
+                            PREPARE_EXIT_REASON_VALIDATION_FAILED,
+                            corrections=corrections,
+                        )
+                    if outcome.changed_files:
+                        steps.append(
+                            PrepareStep(
+                                PREPARE_STAGE_REPAIR,
+                                PREPARE_STEP_OK,
+                                (
+                                    f"round {repair_round}: "
+                                    f"{len(contract_problem_findings)} "
+                                    "contract problem(s) answered by editing "
+                                    + ", ".join(outcome.changed_files)
+                                    + "; revalidating (the source plan is "
+                                    "unchanged)"
+                                ),
+                            )
+                        )
+                        continue
+                    steps.append(
+                        PrepareStep(
+                            PREPARE_STAGE_REPAIR,
+                            PREPARE_STEP_FAILED,
+                            f"round {repair_round}: the repair changed no file",
+                        )
+                    )
+            else:
+                steps.append(
+                    PrepareStep(
+                        PREPARE_STAGE_REPAIR,
+                        PREPARE_STEP_FAILED,
+                        "the same contract problems remained after the last repair",
+                    )
+                )
+        if contract_problem_findings:
+            for session_id, problem in contract_problem_findings:
+                blockers.append(
+                    PrepareBlocker(
+                        stage=PREPARE_STAGE_VALIDATION,
+                        session_id=session_id,
+                        category=CONTRACT_PROBLEM_CATEGORY,
+                        message=f"{problem.message}: {problem.suggested_fix}",
+                    )
+                )
+            steps.append(
+                PrepareStep(
+                    PREPARE_STAGE_VALIDATION,
+                    PREPARE_STEP_FAILED,
+                    (
+                        f"{len(contract_problem_findings)} completion-contract "
+                        "problem(s) require repair and revalidation"
+                    ),
                 )
             )
-        steps.append(
-            PrepareStep(
-                PREPARE_STAGE_VALIDATION,
-                PREPARE_STEP_FAILED,
-                (
-                    f"{len(contract_problem_findings)} completion-contract "
-                    "problem(s) require repair and revalidation"
-                ),
+            return _failed(
+                PREPARE_EXIT_REASON_VALIDATION_FAILED, corrections=corrections
             )
-        )
-        return _failed(PREPARE_EXIT_REASON_VALIDATION_FAILED, corrections=corrections)
+        break
     validation_detail = (
         f"{newly_validated} session(s) validated"
         if newly_validated

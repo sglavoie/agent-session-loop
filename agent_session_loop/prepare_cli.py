@@ -12,6 +12,7 @@ from .authoring_paths import DuplicateSplitError
 from .cli_defaults import program_name
 from .plans_errors import InputReadError, PlanError
 from .prepare import prepare_plan
+from .prepare_contract_repair import DEFAULT_CONTRACT_REPAIR_ROUNDS
 from .prepare_models import (
     DEFAULT_VALIDATOR_HEARTBEAT_SECONDS,
     DEFAULT_VALIDATOR_JOBS,
@@ -108,6 +109,7 @@ def prepare_from_args(args: Any) -> int:
     )
     review_harness = args.review_harness
     review_harness_model = args.review_harness_model
+    repair_rounds = getattr(args, "repair_rounds", DEFAULT_CONTRACT_REPAIR_ROUNDS)
     common_fields = {
         "plan": plan_arg,
         "cwd": str(args.cwd),
@@ -130,6 +132,7 @@ def prepare_from_args(args: Any) -> int:
         },
         "review_harness": review_harness,
         "review_harness_model": review_harness_model,
+        "repair_rounds": repair_rounds,
         "resume": resume,
         "base_dir": str(args.base_dir) if args.base_dir else None,
     }
@@ -177,6 +180,11 @@ def prepare_from_args(args: Any) -> int:
     except PlanError as error:
         return _emit_input_error(PREPARE_EXIT_REASON_INPUT_ERROR, str(error))
 
+    if not isinstance(repair_rounds, int) or repair_rounds < 0:
+        return _emit_input_error(
+            PREPARE_EXIT_REASON_INPUT_ERROR,
+            "--repair-rounds must be zero or a positive integer",
+        )
     if review_harness is not None and review_harness == harness_name:
         return _emit_input_error(
             PREPARE_EXIT_REASON_INPUT_ERROR,
@@ -257,6 +265,7 @@ def prepare_from_args(args: Any) -> int:
             unsafe_bypass=getattr(args, "unsafe_bypass", True),
             state_dir=getattr(args, "state_dir", None),
             rebind_workspace=rebind_workspace,
+            repair_rounds=repair_rounds,
         )
     except _WorkspaceRebindConcurrencyError as error:
         return _emit_input_error(
