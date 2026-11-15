@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    clock,
     events,
     harnesses,
     plans_content_hash,
     plans_snapshot,
     review_guard,
+    run_loop_commit_settlement,
     turn_execution_commit,
     verification_run,
 )
@@ -26,6 +30,63 @@ from tests.support import (
 
 class TurnCommitRejectionTests(TurnCommitRunCase):
     """Evidence recording and guard rejections around the commit."""
+
+    def _assert_rejected_duration(self, *, retained_commit: bool) -> None:
+        if retained_commit:
+            self._mark_repair_session()
+        now = clock.utc_now()
+        elapsed = 0
+        settle = run_loop_commit_settlement._settle_paused_retained_work
+
+        def fail_verification(*args: object, **kwargs: object) -> None:
+            nonlocal elapsed
+            elapsed += 60
+            raise OSError("verifier unavailable")
+
+        def settle_with_elapsed(*args: Any, **kwargs: Any) -> None:
+            nonlocal elapsed
+            settle(*args, **kwargs)
+            if retained_commit:
+                elapsed += 30
+
+        with (
+            mock.patch.dict(os.environ, fake_commit_harness_env(self.tmp_path)),
+            mock.patch.object(
+                clock, "utc_now", side_effect=lambda: now + timedelta(seconds=elapsed)
+            ),
+            mock.patch.object(
+                harnesses,
+                "run_harness",
+                side_effect=self._harness(
+                    writes="SVC:README.md", declares="SVC:README.md"
+                ),
+            ),
+            mock.patch.object(
+                verification_run, "run_verification", side_effect=fail_verification
+            ),
+            mock.patch(
+                "agent_session_loop.run_loop_finalization._settle_paused_retained_work",
+                side_effect=settle_with_elapsed,
+            ),
+        ):
+            exit_code, payload = self._invoke("rejected-duration")
+
+        self.assertNotEqual(0, exit_code)
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        turn = payload["turns"][-1]
+        self.assertEqual(
+            90.0 if retained_commit else 60.0, turn["total_duration_seconds"]
+        )
+        self.assertEqual(0.0, turn["execution_total_duration_seconds"])
+        self.assertEqual(turn, json.loads(Path(turn["result_path"]).read_text()))
+        self.assertNotIn(events.TURN_FINISHED_EVENT, self._names())
+        self.assertEqual(retained_commit, "paused_work_commit" in turn)
+
+    def test_rejected_duration_includes_verification_without_commit_mode(self) -> None:
+        self._assert_rejected_duration(retained_commit=False)
+
+    def test_rejected_duration_includes_retained_work_settlement(self) -> None:
+        self._assert_rejected_duration(retained_commit=True)
 
     def test_ignored_evidence_is_recorded_but_never_staged(self) -> None:
         self._mark_repair_session()

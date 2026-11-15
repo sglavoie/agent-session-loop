@@ -119,6 +119,18 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
         self.assertEqual(40.0, committed["total_duration_seconds"])
         self.assertNotIn("execution_total_duration_seconds", committed)
 
+    def test_refresh_preserves_original_execution_duration(self) -> None:
+        turn = {
+            "total_duration_seconds": 70.0,
+            "execution_total_duration_seconds": 40.0,
+        }
+        turn_execution_commit.refresh_total_duration(
+            turn,
+            {"run_started_at": (clock.utc_now() - timedelta(seconds=100)).isoformat()},
+        )
+        self.assertGreaterEqual(turn["total_duration_seconds"], 100.0)
+        self.assertEqual(40.0, turn["execution_total_duration_seconds"])
+
     def test_committed_turn_carries_the_accepted_snapshot(self) -> None:
         committed, _payload = self._commit(
             {"turn_index": 1, "session": "1", "after": {"stale": True}}

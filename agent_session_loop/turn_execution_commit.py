@@ -254,7 +254,7 @@ def commit_turn(
 def refresh_total_duration(
     committed: MutableMapping[str, Any], payload: Mapping[str, Any]
 ) -> None:
-    """Measure the run's cumulative duration when the turn is published.
+    """Measure the run's cumulative duration when the turn is finalized.
 
     The executor stamps ``total_duration_seconds`` when the harness exits, but
     verification, commit processing and ledger updates run after that and
@@ -267,11 +267,41 @@ def refresh_total_duration(
     if run_started_at is None:
         return
     harness_total = committed.get("total_duration_seconds")
-    if harness_total is not None:
+    if (
+        harness_total is not None
+        and "execution_total_duration_seconds" not in committed
+    ):
         committed["execution_total_duration_seconds"] = harness_total
     committed["total_duration_seconds"] = clock.duration_seconds(
         run_started_at, clock.utc_now()
     )
+
+
+def finalize_paused_turn(
+    payload: dict[str, Any], persistence: turn_execution_protocols.TurnPersistence
+) -> None:
+    """Re-measure the refused turn after verification and retained-work settlement.
+
+    Accepted records are immutable. A pause before any turn exists has no
+    result to finalize, and a refused turn never earns a completion event.
+    """
+    if payload.get("paused") is not True:
+        return
+    turns = payload.get("turns")
+    if not isinstance(turns, list) or not turns:
+        return
+    turn = turns[-1]
+    if not isinstance(turn, dict) or turn.get("committed") is True:
+        return
+    result_path = turn.get("result_path")
+    if not isinstance(result_path, str) or not result_path:
+        return
+    with persistence.lock:
+        finalized = dict(turn)
+        refresh_total_duration(finalized, payload)
+        durability.write_json_file(Path(result_path), finalized, durable=True)
+        replace_turn_record(payload, finalized)
+        persistence.write_state(payload)
 
 
 def reopened_snapshot_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:

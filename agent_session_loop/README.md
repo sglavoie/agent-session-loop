@@ -1,5 +1,10 @@
 # Agent Session Loop (ASL)
 
+Turn results measure `total_duration_seconds` through acceptance or paused
+settlement, including verification and retained-work commits. The original
+harness-exit total remains in `execution_total_duration_seconds`. Rejected
+turns remain unaccepted and emit no `turn_finished` event.
+
 `asl baseline --per-check-timeout SECONDS` replaces the default 120-second
 baseline cap, while each command remains bounded by its contract timeout.
 The inferred total sums the effective budgets of distinct checks and remains

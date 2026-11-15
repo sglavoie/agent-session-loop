@@ -16,6 +16,7 @@ from . import (
     run_inputs,
     run_termination_shared,
     session_verification,
+    turn_execution_commit,
     turn_execution_constants,
     write_guards,
     write_guards_legacy,
@@ -269,6 +270,7 @@ def _finalize_run(frame: RunFrame) -> RunResult | None:
     # `_terminalize`, which snapshots the unresolved commit groups a soft-failed
     # settlement would have to appear in.
     _settle_paused_retained_work(frame.ctx, commit_mode=frame.commit_mode)
+    turn_execution_commit.finalize_paused_turn(frame.ctx.payload, frame.ctx.persistence)
 
     if frame.review_requested:
         # An ordinary repair child can change pending/completed membership
