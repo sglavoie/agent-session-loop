@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from agent_session_loop import commit_message
+from agent_session_loop import commit_message, commit_message_format
 from tests import support_asl_commit_message as fixtures
 from tests.support import (
     git_stdout,
@@ -54,6 +54,7 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
                 "truncation_notes",
                 "from_id",
                 "snapshot",
+                "rules",
             ],
             list(header),
         )
@@ -67,6 +68,8 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         # An unscoped invocation commits the index it is handed, so it has no
         # named-path snapshot to carry forward.
         self.assertIsNone(header["snapshot"])
+        # The host agent writes the message from the generator's own rules.
+        self.assertEqual(commit_message_format.COMMIT_MESSAGE_RULES, header["rules"])
         self.assertIn("diff --git a/src/alpha.py b/src/alpha.py", body)
         # No harness turn is needed to prepare.
         self.assertFalse(self.record_path.exists())

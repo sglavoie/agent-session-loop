@@ -13,6 +13,9 @@ from . import (
     commit_message_diff as diff,
 )
 from . import (
+    commit_message_format as message_format,
+)
+from . import (
     commit_message_git as git,
 )
 from . import (
@@ -171,6 +174,8 @@ def _prepare_header(
     ``snapshot`` names the staged content this header describes so the skill's
     second call can prove it is committing the same thing; it is ``None`` for
     every unscoped invocation, which commits the index it is handed.
+    ``rules`` is the generator prompt's own rule text, so the host agent that
+    writes the message follows the one statement of them.
     """
     return {
         "mode": models.PREPARE_MODE_FROM_ID
@@ -183,6 +188,7 @@ def _prepare_header(
         "truncation_notes": diff.build_truncation_notice(diff_result),
         "from_id": args.from_id,
         "snapshot": snapshot,
+        "rules": message_format.COMMIT_MESSAGE_RULES,
     }
 
 

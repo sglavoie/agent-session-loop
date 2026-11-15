@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent_session_loop import commit_message
+from agent_session_loop import commit_message, commit_message_format
 from tests import support_asl_commit_message as fixtures
 
 
@@ -87,6 +87,11 @@ class CommitPromptTests(unittest.TestCase):
 
         self.assertTrue(prompt.startswith("You are a commit message generator."))
         self.assertIn("Conventional Commits specification", prompt)
+        # The rules are one constant, shared with the `--prepare-only` header.
+        self.assertIn(
+            commit_message_format.COMMIT_MESSAGE_RULES + "\n\n## Output", prompt
+        )
+        self.assertIn("<type>[(scope)]: <short description", prompt)
         self.assertIn("## Format Requirements", prompt)
         self.assertIn("## Content Rules", prompt)
         for commit_type in (
@@ -98,6 +103,8 @@ class CommitPromptTests(unittest.TestCase):
             "chore",
             "perf",
             "style",
+            "build",
+            "ci",
         ):
             with self.subTest(commit_type=commit_type):
                 self.assertIn(f"\n- {commit_type}: ", prompt)

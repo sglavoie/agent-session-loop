@@ -219,6 +219,48 @@ focus on what IS visible rather than speculating about omitted content.
 """
 
 
+# The one statement of the message rules. The generator prompt embeds it and
+# the ``--prepare-only`` header carries it, so a host agent that writes the
+# message itself (the ``gitsummary`` skill) follows the same text.
+COMMIT_MESSAGE_RULES = """\
+## Format Requirements
+
+Use this format:
+<type>[(scope)]: <short description (max 72 chars)>
+
+<body paragraph explaining WHAT changed and WHY>
+
+<optional bullet points for multi-aspect commits>
+
+Add a (scope) only when the change is confined to one named component.
+
+## Type Conventions
+
+- feat: New feature or capability
+- fix: Bug fix
+- docs: Documentation changes only
+- refactor: Code restructuring without behavior change
+- test: Test additions or modifications
+- chore: Maintenance tasks (dependencies, configs)
+- perf: Performance improvements
+- style: Code style/formatting changes
+- build: Build system or packaging changes
+- ci: CI configuration and pipeline changes
+
+## Content Rules
+
+- Use PRESENT TENSE ("Add" not "Added")
+- Focus on WHAT changed and WHY it matters
+- Do NOT describe HOW the code works (implementation details)
+- No spec-specific language (no "phase 1", "task 2", "spec section")
+- Describe the capability delivered so the message stands alone without the plan
+- No markdown syntax (no **bold**, _italic_, or `code`)
+- No author attribution (no "Co-authored-by:", "Signed-off-by:", or similar trailers)
+- Keep title under 72 characters
+- Wrap body at 80 characters
+- For multi-aspect commits, use bullet points with 2-space indent"""
+
+
 def build_commit_prompt(
     diff_result: models.DiffResult, guidance: str | None = None
 ) -> str:
@@ -237,37 +279,7 @@ def build_commit_prompt(
 You are a commit message generator. Analyze the following git diff and generate
 a properly formatted commit message following the Conventional Commits specification.
 
-## Format Requirements
-
-Use this format:
-<type>: <short description (max 72 chars)>
-
-<body paragraph explaining WHAT changed and WHY>
-
-<optional bullet points for multi-aspect commits>
-
-## Type Conventions
-
-- feat: New feature or capability
-- fix: Bug fix
-- docs: Documentation changes only
-- refactor: Code restructuring without behavior change
-- test: Test additions or modifications
-- chore: Maintenance tasks (dependencies, configs)
-- perf: Performance improvements
-- style: Code style/formatting changes
-
-## Content Rules
-
-- Use PRESENT TENSE ("Add" not "Added")
-- Focus on WHAT changed and WHY it matters
-- Do NOT describe HOW the code works (implementation details)
-- No spec-specific language (no "phase 1", "task 2", "spec section")
-- No markdown syntax (no **bold**, _italic_, or `code`)
-- No author attribution (no "Co-authored-by:", "Signed-off-by:", or similar trailers)
-- Keep title under 72 characters
-- Wrap body at 80 characters
-- For multi-aspect commits, use bullet points with 2-space indent
+{COMMIT_MESSAGE_RULES}
 
 ## Output Format
 

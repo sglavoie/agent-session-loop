@@ -274,9 +274,10 @@ modes:
   stages and never commits; apply it with `git commit --amend` if you want it.
 - **`--prepare-only`** — emit a single-line JSON header (`mode`, `yes`,
   `no_verify`, `guidance`, `is_truncated`, `truncation_notes`, `from_id`,
-  `snapshot`), a blank line, and the budgeted diff, then stop. No harness turn
-  is taken; this is how the `gitsummary` skill hands the diff to its own host
-  agent.
+  `snapshot`, `rules`), a blank line, and the budgeted diff, then stop. `rules`
+  is the message-rule text the default mode gives its own generator. No harness
+  turn is taken; this is how the `gitsummary` skill hands the diff and those
+  rules to its own host agent.
 - **`--message-file PATH`** — commit the supplied message instead of generating
   one, with `-` reading stdin. It is formatted and stripped of disallowed
   attribution trailers exactly as a generated message would be, but nothing
