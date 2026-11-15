@@ -61,6 +61,8 @@ Read the entire plan file and identify:
 
 Ignore content inside fenced code blocks (``` or ~~~) when identifying plan structure.
 
+If `${LESSONS_DIR:-$HOME/.local/share/lessons}/lessons.md` exists, read that one-line-per-lesson index and open only the lesson files whose applicability cue matches the plan's repositories, tools, or approach. Use a matching lesson as evidence in the completeness assessment and the premortem — a past failure the plan would repeat is a gap to raise — and check it against the current code before relying on it. When the index is absent, continue without it.
+
 A heading that looks like a session marker but fails the parser is a malformed candidate: surface malformed-candidate parser errors directly rather than treating them as ordinary content or as an absence of markers. Accepted headings count immediately, without a normalization question or source rewrite. Reserve `session-split`'s boundary-proposal workflow for a plan that canonical parsing confirms has no explicit session headings.
 
 ### Step 2: Assess Completeness
