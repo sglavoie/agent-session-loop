@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -86,6 +87,44 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
             "print('alpha')", git_stdout(self.repo, "show", "HEAD:src/alpha.py")
         )
         self.assertIn("A  src/beta.py", self.porcelain())
+
+    def test_prepare_only_spells_out_the_committing_call(self) -> None:
+        # The host agent runs the header's command as given, so it must carry
+        # the whole scope: a path needing quotes, the token and the repository.
+        self.write("src/alpha one.py", "print('alpha')\n")
+        self.write("src/beta.py", "print('beta')\n")
+        commit_message.stage_paths(self.repo, ["src/beta.py"])
+
+        code, out, err = self.run_commit(
+            str(self.repo), "--prepare-only", "--pathspec", "src/alpha one.py"
+        )
+        self.assertEqual(0, code, err)
+        header = json.loads(out.partition("\n\n")[0])
+        words = shlex.split(header["commit_command"])
+        self.assertEqual(["asl", "commit"], words[:2])
+        self.assertIn(f"--expect-snapshot={header['snapshot']}", words)
+        self.assertEqual(str(self.repo.resolve()), words[-1])
+
+        code, _out, err = self.run_commit(
+            *words[2:], stdin="feat: add the alpha module\n\nIt prints a greeting.\n"
+        )
+
+        self.assertEqual(0, code, err)
+        committed = git_stdout(self.repo, "show", "--name-only", "--format=", "HEAD")
+        self.assertEqual(["src/alpha one.py"], committed.splitlines())
+        self.assertIn("A  src/beta.py", self.porcelain())
+
+        # Once the path drifts, the same command refuses instead of committing.
+        self.write("src/alpha one.py", "print('later')\n")
+        code, out, err = self.run_commit(
+            str(self.repo), "--prepare-only", "--pathspec", "src/alpha one.py"
+        )
+        self.assertEqual(0, code, err)
+        words = shlex.split(json.loads(out.partition("\n\n")[0])["commit_command"])
+        self.write("src/alpha one.py", "print('drifted')\n")
+        code, _out, err = self.run_commit(*words[2:], stdin="fix: adjust alpha\n")
+        self.assertEqual(1, code)
+        self.assertIn("changed after the diff was captured", err)
 
     def test_pathspec_commit_outruns_an_edit_landing_after_validation(self) -> None:
         # Every other drift test mutates the path early enough for a later

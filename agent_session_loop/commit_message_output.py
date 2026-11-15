@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -161,6 +162,36 @@ def _confirm(args: argparse.Namespace, question: str) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
+def _commit_command(args: argparse.Namespace, snapshot: str | None) -> str | None:
+    """The shell command that commits what this ``--prepare-only`` call captured.
+
+    The host agent's second call has to repeat the first one's scope exactly —
+    every ``--pathspec``, the snapshot token, the hook choice and the
+    repository — and retyping them is where the two calls drift apart. Spelled
+    out here once, the agent runs this string as given and feeds the message
+    on stdin. ``--yes`` is always present: whether to ask first is the header's
+    ``yes`` field, answered in the conversation before this command runs. The
+    repository is named by its root, so the command works from any directory.
+    ``None`` for ``--from-id``, which never commits.
+    """
+    if args.from_id:
+        return None
+    words = ["asl", "commit"]
+    if args.pathspec:
+        # The ``=`` form keeps a path that starts with a dash an argument.
+        words.extend(f"--pathspec={path}" for path in args.pathspec)
+        if snapshot:
+            words.append(f"--expect-snapshot={snapshot}")
+    else:
+        # The index this call staged is what gets committed, and nothing
+        # dirtied since.
+        words.append("--staged")
+    words.extend(["--message-file", "-", "--yes"])
+    words.append("--verify" if args.verify else "--no-verify")
+    words.append(str(_resolve_repo_root(args.path)))
+    return shlex.join(words)
+
+
 def _prepare_header(
     args: argparse.Namespace,
     diff_result: models.DiffResult,
@@ -175,7 +206,8 @@ def _prepare_header(
     second call can prove it is committing the same thing; it is ``None`` for
     every unscoped invocation, which commits the index it is handed.
     ``rules`` is the generator prompt's own rule text, so the host agent that
-    writes the message follows the one statement of them.
+    writes the message follows the one statement of them. ``commit_command``
+    is the complete second call, so the agent repeats nothing by hand.
     """
     return {
         "mode": models.PREPARE_MODE_FROM_ID
@@ -189,6 +221,7 @@ def _prepare_header(
         "from_id": args.from_id,
         "snapshot": snapshot,
         "rules": message_format.COMMIT_MESSAGE_RULES,
+        "commit_command": _commit_command(args, snapshot),
     }
 
 

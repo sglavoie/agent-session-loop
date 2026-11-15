@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import unittest
 
 from agent_session_loop import commit_message, commit_message_format
@@ -55,6 +56,7 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
                 "from_id",
                 "snapshot",
                 "rules",
+                "commit_command",
             ],
             list(header),
         )
@@ -70,6 +72,12 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         self.assertIsNone(header["snapshot"])
         # The host agent writes the message from the generator's own rules.
         self.assertEqual(commit_message_format.COMMIT_MESSAGE_RULES, header["rules"])
+        # The second call is spelled out: the index as staged, no hooks.
+        self.assertEqual(
+            "asl commit --staged --message-file - --yes --no-verify "
+            + shlex.quote(str(self.repo.resolve())),
+            header["commit_command"],
+        )
         self.assertIn("diff --git a/src/alpha.py b/src/alpha.py", body)
         # No harness turn is needed to prepare.
         self.assertFalse(self.record_path.exists())
@@ -105,6 +113,8 @@ class CommitHandlerTests(fixtures.CommitHandlerCase):
         header = json.loads(out.partition("\n\n")[0])
         self.assertEqual("from-id", header["mode"])
         self.assertEqual(sha, header["from_id"])
+        # Describing a commit never creates one, so there is nothing to run.
+        self.assertIsNone(header["commit_command"])
 
     def test_prepare_only_json_carries_the_same_header_plus_the_diff(self) -> None:
         self.write("src/alpha.py", "print('alpha')\n")
