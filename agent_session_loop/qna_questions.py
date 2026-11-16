@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import cli_common, pause_policy, plans_errors, responses
+from . import cli_common, cli_trace_notes, pause_policy, plans_errors, responses
 from .cli_defaults import program_name
 from .qna_context import load_qna_context
 from .qna_models import QnAContext, QnAError
@@ -142,6 +142,7 @@ def _emit_questions_error(
     plan_dir: str | Path,
     details: dict[str, Any],
 ) -> int:
+    cli_trace_notes.note_reason(reason)
     if want_json:
         responses.print_json(
             responses.error_payload(

@@ -140,7 +140,12 @@ def _mark_complete(path: Path) -> None:
                             "deterministic fixture work."
                         )
                 suffix = "\n" if text.endswith("\n") else ""
-                path.write_text("\n".join(lines) + suffix, encoding="utf-8")
+                # Replaced, never rewritten in place, so a concurrent reader
+                # of the plan sees the old handoff or the new one, never an
+                # empty file.
+                staged = path.with_name(f".{path.name}.fixture-tmp")
+                staged.write_text("\n".join(lines) + suffix, encoding="utf-8")
+                os.replace(staged, path)
                 return
         return
 

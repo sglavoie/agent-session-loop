@@ -80,6 +80,8 @@ from typing import Any
 
 from . import (
     assurance_report,
+    cli_trace_notes,
+    desktop_notify,
     events,
     harnesses,
     pause_policy,
@@ -91,6 +93,7 @@ from . import (
     plans_registry,
     responses,
     review_session_contract,
+    run_outcome_summary,
     run_reporting,
     run_selection,
     state,
@@ -385,6 +388,8 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
             print(f"Run paused: {payload['pause_reason']}", file=sys.stderr)
             if payload.get("pause_message"):
                 print(f"Pause detail: {payload['pause_message']}", file=sys.stderr)
+            for line in run_outcome_summary.failed_check_lines(payload):
+                print(line, file=sys.stderr)
             details = payload.get("pause_details") or payload.get("details")
             guard = (
                 details.get("workspace_write_guard")
@@ -421,11 +426,22 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
             questions_command = interactive_help.get("questions_command")
             if questions_command:
                 print(f"Questions: {questions_command}", file=sys.stderr)
+            # The exact way back in, so nobody has to rebuild the command
+            # from the plan path and the flags the run started with.
+            recovery_command = interactive_help.get("recovery_command")
+            reply_command = interactive_help.get("reply_command")
+            if recovery_command:
+                print(f"Recover with: {recovery_command}", file=sys.stderr)
+            elif reply_command:
+                print(f"Resume with: {reply_command}", file=sys.stderr)
         commit = _last_commit(payload)
         if commit is not None:
             print(f"Commit stdout: {commit['stdout_path']}", file=sys.stderr)
             print(f"Commit stderr: {commit['stderr_path']}", file=sys.stderr)
             print(f"Commit result: {commit['result_path']}", file=sys.stderr)
+        summary = run_outcome_summary.summary_line(payload)
+        if summary and payload["turns"]:
+            print(summary, file=sys.stderr)
         return
 
     final_snapshot = payload["final_snapshot"]
@@ -443,10 +459,24 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
             status_line = review_verdict.get("status_line")
             if status_line:
                 print(status_line)
+    summary = run_outcome_summary.summary_line(payload)
+    if summary:
+        print(summary)
 
 
 def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
     task_packet_help._attach_interactive_help(args, payload)
+    if not payload.get("ok"):
+        # The loop builds its own terminal payload, so the trace hears the
+        # reason here rather than through ``responses.error_payload``.
+        paused = bool(payload.get("paused"))
+        cli_trace_notes.note_reason(
+            payload.get("pause_reason") if paused else payload.get("reason"),
+            paused=paused,
+        )
+    desktop_notify.notify_run_outcome(
+        payload, supervised=bool(getattr(args, "json", False))
+    )
     try:
         if args.json:
             responses.print_json(payload)

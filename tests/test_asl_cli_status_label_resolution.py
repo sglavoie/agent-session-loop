@@ -80,7 +80,10 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
                 [plan_dir.name, "--state-dir", str(state_dir)],
                 check=True,
             )
-            self.assertEqual("Plan title: Manifest", completed.stdout.splitlines()[0])
+            # The headline leads; the detail block still opens with the title.
+            lines = completed.stdout.splitlines()
+            self.assertEqual("Manifest", lines[0])
+            self.assertIn("Plan title: Manifest", lines)
             self.assertIn(
                 str(plans_files.canonicalize_path(plan_dir)), completed.stdout
             )

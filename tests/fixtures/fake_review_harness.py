@@ -97,9 +97,13 @@ def execute(prompt: str) -> None:
         files = ["APP:totals.py"]
     # Generated repository-aware handoffs start at (none), legacy ones at
     # (none yet); the fixture's shared helper expects the latter placeholder.
-    session.write_text(
+    # Replaced, never rewritten in place: a supervisor polling the plan must
+    # not catch the session file truncated and report it as malformed.
+    staged = session.with_name(f".{session.name}.fixture-tmp")
+    staged.write_text(
         text.replace("- **Files modified**: (none)", "- **Files modified**: (none yet)")
     )
+    os.replace(staged, session)
     os.environ["FAKE_CODEX_HANDOFF_FILES_JSON"] = json.dumps(
         {session.stem.removeprefix("session-"): files}
     )

@@ -247,11 +247,14 @@ opened is skipped before its event log is read.
 `cli_invocations` is additive: every pre-existing metrics field keeps its name,
 type, and meaning. It carries `trace_root`, `retention_days`, `records_read`,
 `records_ignored`, `starts`, `completions`, `successes`, `nonzero_exits`,
-`usage_errors`, `help_calls`, `interruptions`, `exceptions`,
+`pauses` (runs that exited nonzero because they stopped at a pause, counted
+apart from `nonzero_exits` and left out of `recent_failures`), `usage_errors`, `help_calls`, `interruptions`, `exceptions`,
 `unmatched_starts`, the `by_command`, `by_help_depth`, `by_exit_code`,
 `by_harness`, and `by_origin` count maps, a `durations_ms` object
 (`count`, `median`, `p95`, `max`, `total`, with the summaries null when no
-invocation completed in the window), and `recent_failures`. An invocation is
+invocation completed in the window), `failure_reasons` (the ten most common
+`command`/`reason` pairs among failed and paused invocations, each with its
+`count`), and `recent_failures`. An invocation is
 windowed by its start timestamp, so `cli_invocations` narrows with
 `--since-days` exactly like every other section.
 

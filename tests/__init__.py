@@ -12,6 +12,11 @@ TRACE_ENV_VAR = "ASL_CLI_TRACE"
 # temporary state root.
 os.environ[TRACE_ENV_VAR] = "0"
 
+# A run that ends in the suite must not post a desktop notification on the
+# developer's machine. ``agent_session_loop.desktop_notify.ENV_VAR``, spelled
+# out for the same reason as above; its own tests pass an explicit ``env``.
+os.environ["ASL_DESKTOP_NOTIFY"] = "0"
+
 #: Placeholder ``codex``, ``claude`` and ``copilot`` executables, put first on
 #: PATH. Much of the suite mocks the harness call but still goes through the
 #: real "is it installed" check (``shutil.which``), so without these it passes

@@ -168,6 +168,15 @@ def _add_run_inspection_commands(
         help="Print recent activity and exit without waiting",
     )
     tail_parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Also show routine bookkeeping events (finalization heartbeats, "
+            "accepted Agent Mux deliveries, conversation continuations), "
+            "which are hidden by default"
+        ),
+    )
+    tail_parser.add_argument(
         "--json",
         action="store_true",
         help=(

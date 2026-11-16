@@ -25,6 +25,7 @@ from agent_session_loop import (
     state_abandonment,
     state_locks,
     state_status,
+    state_status_text,
 )
 from tests.asl_core_support import ParserAndStateTestsBase
 from tests.support import (
@@ -69,7 +70,8 @@ class ParserAndStateTests(ParserAndStateTestsBase):
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
             self.assertIn(
-                "Progress journal: 1 entry, last appended 2026-06-19T14:22:00Z",
+                "Progress journal: 1 entry, last appended "
+                + state_status_text._when("2026-06-19T14:22:00Z"),
                 output,
             )
 
@@ -240,17 +242,23 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 },
                 (
                     "Run state: paused (verification-failed) at "
-                    "2026-06-19T12:29:00+00:00",
+                    + state_status_text._when("2026-06-19T12:29:00+00:00"),
                     "Pause detail: check `just test` failed",
                 ),
             ),
             (
                 {"ok": True, "paused": False, "reason": "all-complete"},
-                ("Run state: finished all-complete at 2026-06-19T12:30:00+00:00",),
+                (
+                    "Run state: finished all-complete at "
+                    + state_status_text._when("2026-06-19T12:30:00+00:00"),
+                ),
             ),
             (
                 {"ok": False, "paused": False, "reason": "abandoned"},
-                ("Run state: stopped (abandoned) at 2026-06-19T12:30:00+00:00",),
+                (
+                    "Run state: stopped (abandoned) at "
+                    + state_status_text._when("2026-06-19T12:30:00+00:00"),
+                ),
             ),
         )
         for fields, expected in cases:
@@ -275,7 +283,7 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 lines = buffer.getvalue().splitlines()
                 start = lines.index(
                     "Run state: run 20260619T120000Z-4 started "
-                    "2026-06-19T12:00:00+00:00"
+                    + state_status_text._when("2026-06-19T12:00:00+00:00")
                 )
                 self.assertEqual(
                     list(expected), lines[start + 1 : start + 1 + len(expected)]

@@ -347,3 +347,22 @@ def _add_progress_commands(
         help="Print machine-readable JSON output",
     )
     plans_parser.set_defaults(handler_ref="plans_cli:plans_from_args")
+
+    home_parser = subparsers.add_parser(
+        "home",
+        help=(
+            "Show what is running, what needs you, and what finished lately "
+            "(what a bare invocation shows)."
+        ),
+    )
+    home_parser.add_argument(
+        "--state-dir",
+        metavar="DIR",
+        help="Override operational state directory",
+    )
+    home_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    home_parser.set_defaults(handler_ref="home:home_from_args")

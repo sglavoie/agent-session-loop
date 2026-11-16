@@ -86,6 +86,19 @@ def plan_title_from_markdown(content: str) -> str | None:
     return None
 
 
+def read_plan_title(plan_dir: str | os.PathLike[str]) -> str | None:
+    """Best-effort title of the plan in ``plan_dir``, from its manifest's H1.
+
+    For listings and lookups that want a human name beside a hashed directory
+    and must never fail because one manifest is missing or unreadable.
+    """
+    try:
+        text = (Path(plan_dir) / "manifest.md").read_text(encoding="utf-8")
+    except OSError, UnicodeDecodeError:
+        return None
+    return plan_title_from_markdown(text)
+
+
 def os_error_reason(error: OSError) -> str:
     """The OS's wording for ``error``, such as ``No such file or directory``.
 

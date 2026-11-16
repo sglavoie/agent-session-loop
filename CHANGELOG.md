@@ -14,6 +14,36 @@ A polish and hardening round after the public release.
 
 ### Added
 
+- Running `asl` with no command shows a home screen (`asl home`): what is
+  running, what needs you and what finished in the last three days, each plan
+  named by its title. `asl --help` opens with the handful of everyday commands
+  ahead of the full list.
+
+- Every `PLAN_DIR_OR_ID` argument accepts a shorthand: a unique prefix of the
+  plan's directory name (`asl status 213a`) or a fragment of its title. A
+  shorthand that picks one plan says which on stderr; one that matches several
+  lists them by title.
+
+- `asl run` ends on a `Summary:` line naming the plan by title with its session
+  count, duration, commits and review verdict. A `verify-failed` pause names
+  each failed check and prints the last lines of its output, and a paused run
+  prints the exact `Resume with:` or `Recover with:` command.
+
+- On macOS, `asl run` posts a desktop notification when a plan finishes after
+  an unattended run or pauses needing a person. `ASL_DESKTOP_NOTIFY=0` turns
+  it off.
+
+- The CLI trace records the `reason` slug of a nonzero exit and records a run
+  that stopped at a pause as outcome `paused`. `asl metrics` counts `pauses`
+  apart from failures and ranks `failure_reasons` per command, including the
+  preflight category that refused.
+
+- `asl harness-compat` says how many turns completed locally on a version the
+  tested window does not cover (`local_evidence` under `--json`), and marks the
+  row `ok` rather than `warn` once ten or more have, or `idle` when that
+  harness has not run here at all. `--strict` and the JSON status still follow
+  the pinned window.
+
 - `asl prepare` now repairs validator-reported completion-contract problems
   itself instead of stopping on the first round. Each repair round is one
   sandboxed turn of the validator harness that may edit only `context.md` and
@@ -426,6 +456,36 @@ A polish and hardening round after the public release.
   form feeds or Unicode line separators sit above it.
 
 ### Changed
+
+- `asl status` opens with a three-line headline: the title, progress and
+  current activity, and whether anything is waiting on a person. The detail
+  block follows unchanged.
+
+- `asl status` prints every moment in its detail block in local time with its
+  UTC offset; `--json` is unchanged.
+
+- `asl assurance list` shows each issue's age and ends with where to start:
+  the open issue seen most often, the command that opens it and the three that
+  dispose of it. `asl home` names that issue beside the open count.
+
+- `asl plans` prints each plan's title, the reason beside a stopped state, and
+  its last activity in local time with its age; `--json` adds `title`.
+
+- `asl run` without `--cwd` starts in the directory the plan was prepared for
+  instead of refusing the current one. A stated `--cwd` that disagrees is still
+  refused, and the refusal names the `--cwd` to use.
+
+- A dirty-worktree preflight finding names the dirty paths.
+
+- `asl tail` hides routine bookkeeping events (finalization heartbeats,
+  conversation continuations, commit-group updates, accepted Agent Mux
+  deliveries) unless `--all` is given. `--json` is unfiltered.
+
+- The hang sentinel first samples a silent turn after five minutes instead of
+  two (`ASL_HANG_TRIGGER_IDLE_SECONDS` still overrides it).
+
+- `asl metrics` prints long durations as time rather than milliseconds, and
+  "nothing to reclaim" instead of a negative byte count.
 
 - Documentation: a first-run path in the README, `asl prepare` as the front
   door in the setup guide, an inspection and maintenance summary in the

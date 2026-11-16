@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import plans_metadata, repository_intent, responses
+from . import cli_trace_notes, plans_metadata, repository_intent, responses
 from .authoring_transaction import PlanTransaction
 from .cli_defaults import program_name
 from .plans_errors import (
@@ -177,6 +177,7 @@ def expand_ingest_from_args(args: Any) -> int:
     common_fields = {"plan_dir": plan_dir, "batch_file": batch_file}
 
     def _emit_error(reason: str, error: str, **extra: Any) -> int:
+        cli_trace_notes.note_reason(reason)
         if want_json:
             responses.print_json(
                 responses.error_payload(

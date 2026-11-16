@@ -13,6 +13,7 @@ from typing import Any
 
 from . import (
     agent_mux_contract,
+    cli_trace_notes,
     plans_errors,
     plans_session_ids,
     plans_snapshot,
@@ -271,6 +272,7 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
     }
 
     def _emit_error(reason: str, error: str) -> int:
+        cli_trace_notes.note_reason(reason)
         if want_json:
             responses.print_json(
                 responses.error_payload(
@@ -383,6 +385,7 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
     else:
         reason = CONTRACT_CHECK_EXIT_REASON_CONTRACT_SET_ISSUES
         failure_message = "the AgentMux compatibility contract set is inconsistent"
+    cli_trace_notes.note_reason(reason)
     if want_json:
         responses.print_json(
             responses.error_payload(

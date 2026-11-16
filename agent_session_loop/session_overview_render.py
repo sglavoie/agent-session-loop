@@ -1,5 +1,6 @@
 """Focused portion of agent_session_loop/session_overview.py."""
 
+from . import cli_trace_notes
 from .cli_defaults import program_name
 from .cli_parser_support import POSITIVE_INTEGER, flag_refusal
 from .session_overview_running import *
@@ -252,6 +253,7 @@ def sessions_from_args(args: argparse.Namespace) -> int:
     # so it is refused like `assurance list --limit 0`.
     if limit < 1:
         message = flag_refusal("--limit", POSITIVE_INTEGER, limit)
+        cli_trace_notes.note_reason("input-error")
         if args.json:
             responses.print_json(
                 responses.error_payload(
@@ -268,6 +270,7 @@ def sessions_from_args(args: argparse.Namespace) -> int:
     try:
         resolved_state_root = state.state_root(args.state_dir)
     except OSError as error:
+        cli_trace_notes.note_reason("state-error")
         if args.json:
             responses.print_json(
                 responses.error_payload(
@@ -297,6 +300,7 @@ def sessions_from_args(args: argparse.Namespace) -> int:
             recent_rows, recent_skipped = scan_recent_rows(args.state_dir, limit=limit)
             skipped_combined.extend(recent_skipped)
     except OSError as error:
+        cli_trace_notes.note_reason("state-error")
         if args.json:
             responses.print_json(
                 responses.error_payload(

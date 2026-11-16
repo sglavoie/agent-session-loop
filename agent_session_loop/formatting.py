@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -20,6 +20,28 @@ def format_local_timestamp(moment: datetime) -> str:
     except OverflowError, ValueError:
         local = moment
     return local.isoformat(sep=" ", timespec="seconds")
+
+
+def format_relative_age(moment: datetime | None, *, now: datetime | None = None) -> str:
+    """How long ago ``moment`` was, coarsely: ``just now``, ``12m ago``, ``3d ago``.
+
+    Empty for an unknown moment, so a caller can append it unconditionally. A
+    moment in the future (clock skew between writer and reader) reads as
+    ``just now`` rather than as a negative age.
+    """
+    if moment is None:
+        return ""
+    current = datetime.now(UTC) if now is None else now
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    seconds = (current - moment).total_seconds()
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
 
 
 def count_noun(count: Any, singular: str, plural: str | None = None) -> str:

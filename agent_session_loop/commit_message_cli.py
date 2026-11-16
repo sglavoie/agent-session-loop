@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from . import cli_trace_notes
 from . import (
     commit_message_diff as diff,
 )
@@ -252,6 +253,7 @@ def commit_from_args(args: argparse.Namespace) -> int:
     try:
         return _dispatch_commit(args)
     except models.CommitMessageError as error:
+        cli_trace_notes.note_reason(error.reason)
         if args.json:
             responses.print_json(
                 responses.error_payload(

@@ -280,6 +280,35 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
     return ", ".join(str(part) for part in parts)
 
 
+#: Events that only say "still here" or "handed on": true, frequent, and never
+#: what a person tailing a run is looking for.
+_ROUTINE_EVENTS = frozenset(
+    {
+        "finalization_heartbeat",
+        "conversation_continuation",
+        "commit_group_updated",
+    }
+)
+#: Delivery outcomes that mean the companion took the event as intended.
+_ROUTINE_DELIVERY_STATUSES = frozenset({"accepted", "duplicate"})
+
+
+def is_routine(record: dict[str, Any]) -> bool:
+    """Whether ``record`` is bookkeeping a default ``asl tail`` leaves out.
+
+    A delivery that was accepted is routine; one that failed is not, so a
+    quiet tail still shows the Agent Mux hand-off the moment it goes wrong.
+    ``asl tail --all`` and ``asl tail --json`` show everything.
+    """
+    name = record.get("name")
+    if name in _ROUTINE_EVENTS:
+        return True
+    if name == events.AGENT_MUX_DELIVERY_EVENT:
+        status = tail_records._payload(record).get("final_status")
+        return status in _ROUTINE_DELIVERY_STATUSES
+    return False
+
+
 def _event_line(record: dict[str, Any]) -> str:
     name = str(record.get("name") or "unknown")
     payload = tail_records._payload(record)

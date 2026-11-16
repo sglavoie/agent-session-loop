@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import responses
+from . import cli_trace_notes, responses
 from .authoring_paths import DuplicateSplitError
 from .cli_defaults import program_name
 from .plans_errors import InputReadError, PlanError
@@ -148,6 +148,7 @@ def prepare_from_args(args: Any) -> int:
         workspace_rebind: dict[str, Any] | None = None,
         details: dict[str, Any] | None = None,
     ) -> int:
+        cli_trace_notes.note_reason(reason)
         if want_json:
             extra_fields: dict[str, Any] = {}
             if workspace_rebind is not None:
@@ -314,6 +315,7 @@ def prepare_from_args(args: Any) -> int:
             _print_text_prepare(result, plan_arg=plan_arg)
         return 0
 
+    cli_trace_notes.note_reason(result.reason)
     error_message = (
         result.blockers[0].message
         if result.blockers

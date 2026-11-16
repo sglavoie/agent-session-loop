@@ -53,7 +53,10 @@ The less self-describing names, one line each:
   progress journal or the manifest readiness line and reran preflight; the
   payload is the repair's action, category, and path.
 - `turn_hang_suspected` / `turn_hang_cleared`: the live hang assessment
-  crossed into, or retracted, a suspected hang for the active turn.
+  crossed into, or retracted, a suspected hang for the active turn. A turn's
+  CPU is first sampled after five minutes of silence
+  (`ASL_HANG_TRIGGER_IDLE_SECONDS` overrides that), long enough that a model
+  thinking between tool calls is not reported as one.
 - `harness_degraded`: the harness lost an auxiliary transport on the way up
   and ran the turn anyway; it carries no pause or failure reason.
 - `control_plane_degraded`: a worker's own `asl inbox read` (or `inbox

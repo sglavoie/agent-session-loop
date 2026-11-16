@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from . import workspaces
-from .formatting import count_noun, format_duration_seconds
+from .cli_defaults import program_name
+from .formatting import (
+    count_noun,
+    format_duration_seconds,
+    format_local_timestamp,
+    format_relative_age,
+)
 from .state_mailbox_status import _guidance_state_summary
 from .state_payloads import _session_label_from_payload
 
@@ -23,16 +30,119 @@ def _run_outcome_line(runner_state: dict[str, Any]) -> str | None:
     finished_at = runner_state.get("run_finished_at")
     if runner_state.get("paused"):
         paused_at = runner_state.get("paused_at") or finished_at
-        when = f" at {paused_at}" if paused_at else ""
+        when = f" at {_when(paused_at)}" if paused_at else ""
         return f"Run state: paused ({reason}){when}"
     if not finished_at:
         return None
     if runner_state.get("ok"):
-        return f"Run state: finished {reason} at {finished_at}"
-    return f"Run state: stopped ({reason}) at {finished_at}"
+        return f"Run state: finished {reason} at {_when(finished_at)}"
+    return f"Run state: stopped ({reason}) at {_when(finished_at)}"
+
+
+def _when(stamp: Any, fallback: str = "unknown") -> str:
+    """An ISO timestamp in the reader's local time, or ``fallback``.
+
+    Every moment ``asl status`` prints goes through here, so the detail block
+    reads on the same clock as ``asl sessions``, ``asl tail`` and the
+    headline. ``--json`` keeps the stored UTC strings. A value that does not
+    parse is printed as it is rather than hidden.
+    """
+    if not isinstance(stamp, str) or not stamp:
+        return fallback
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return stamp
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return format_local_timestamp(parsed)
+
+
+def _local(stamp: Any) -> str:
+    """An ISO timestamp as local time with its age, or the value unchanged."""
+    if not isinstance(stamp, str) or not stamp:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return stamp
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return f"{format_local_timestamp(parsed)} ({format_relative_age(parsed)})"
+
+
+def status_headline(payload: dict[str, Any]) -> list[str]:
+    """The answer to "where does this plan stand?" in two or three lines.
+
+    Everything below it in ``asl status`` is evidence; this is the reading of
+    it: how far along the plan is, what is happening right now, and whether
+    anything is waiting on a person.
+    """
+    sessions = payload.get("sessions") or []
+    complete = sum(1 for session in sessions if session.get("status") == "complete")
+    progress = f"{complete} of {len(sessions)} sessions complete"
+    runner_state = payload.get("runner_state") or {}
+    program = program_name()
+    plan = Path(str(payload.get("plan_dir") or "")).name
+    lines: list[str] = []
+    needs: str | None = None
+
+    waiting = payload.get("waiting_for_reply")
+    verification = payload.get("active_verification")
+    turn = payload.get("active_turn")
+    if isinstance(waiting, dict):
+        now = f"waiting for a reply on session {_session_label_from_payload(waiting)}"
+        needs = f"answer the open question: `{program} questions {plan}`"
+    elif isinstance(verification, dict):
+        check_index = verification.get("current_check_index")
+        position = (
+            f"check {int(check_index) + 1}/{verification.get('check_count')} "
+            if check_index is not None and verification.get("check_count")
+            else ""
+        )
+        name = verification.get("current_check_name") or "starting"
+        elapsed = format_duration_seconds(verification.get("elapsed_seconds"))
+        now = (
+            f"verifying session {_session_label_from_payload(verification)} "
+            f"({position}{name}, {elapsed})"
+        )
+    elif isinstance(turn, dict):
+        elapsed = format_duration_seconds(turn.get("elapsed_seconds"))
+        now = (
+            f"working on session {_session_label_from_payload(turn)} "
+            f"(turn {turn.get('turn_index')}, {elapsed})"
+        )
+        action = turn.get("action_required")
+        if isinstance(action, dict):
+            needs = f"the worker reports {action.get('reason')}"
+    elif runner_state.get("paused"):
+        reason = runner_state.get("reason") or "unknown"
+        when = _local(
+            runner_state.get("paused_at") or runner_state.get("run_finished_at")
+        )
+        now = f"paused ({reason}) {when}"
+        message = runner_state.get("pause_message")
+        needs = message if isinstance(message, str) and message else "see below"
+    elif runner_state.get("run_finished_at"):
+        verb = "finished" if runner_state.get("ok") else "stopped"
+        reason = runner_state.get("reason") or "unknown"
+        now = f"{verb} ({reason}) {_local(runner_state.get('run_finished_at'))}"
+    elif payload.get("next_pending") is None:
+        now = "nothing left to run"
+    else:
+        next_pending = payload.get("next_pending_id") or payload["next_pending"]
+        now = f"not running; next is session {next_pending}"
+
+    lines.append(str(payload.get("plan_title") or plan))
+    lines.append(f"  {progress} · {now}")
+    lines.append(f"  Needs you: {needs}" if needs else "  Nothing needs you.")
+    return lines
 
 
 def _print_text_status(payload: dict[str, Any]) -> None:
+    for line in status_headline(payload):
+        print(line)
+    print()
     print(f"Plan title: {payload['plan_title']}")
     print(f"Plan: {payload['plan_dir']}")
     print(f"Plan hash: {payload['plan_hash']}")
@@ -52,7 +162,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             f"availability {spark.get('reason', 'unknown')}"
         )
         if spark.get("retry_at"):
-            line += f" until {spark['retry_at']}"
+            line += f" until {_when(spark['retry_at'])}"
         route = spark.get("active_route")
         if isinstance(route, dict) and route.get("fallback_reason"):
             line += f"; fallback {route['fallback_reason']}"
@@ -90,7 +200,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         print(f"Run state: unreadable ({runner_state['error']})")
     elif runner_state.get("present"):
         run_id = runner_state.get("run_id") or "unknown"
-        run_started_at = runner_state.get("run_started_at") or "unknown"
+        run_started_at = _when(runner_state.get("run_started_at"))
         print(f"Run state: run {run_id} started {run_started_at}")
         outcome = _run_outcome_line(runner_state)
         if outcome:
@@ -103,7 +213,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             print(f"Run state: stale/orphaned ({stale_reason})")
         abandoned = runner_state.get("abandoned")
         if isinstance(abandoned, dict):
-            detected_at = abandoned.get("detected_at") or "unknown"
+            detected_at = _when(abandoned.get("detected_at"))
             trigger = abandoned.get("trigger") or "unknown"
             lock_reason = abandoned.get("lock_reason") or "no lock file"
             print(
@@ -249,11 +359,11 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         elif mailbox_status.get("lease_fresh"):
             print(
                 "Mailbox lease: fresh, updated "
-                f"{mailbox_status.get('lease_updated_at') or 'unknown'}"
+                f"{_when(mailbox_status.get('lease_updated_at'))}"
             )
         elif mailbox_status.get("lease_present"):
             reason = mailbox_status.get("lease_reason") or "stale"
-            updated_at = mailbox_status.get("lease_updated_at") or "unknown"
+            updated_at = _when(mailbox_status.get("lease_updated_at"))
             print(f"Mailbox lease: stale ({reason}), updated {updated_at}")
         else:
             print("Mailbox lease: absent")
@@ -269,7 +379,9 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             last_appended = progress_journal.get("last_appended")
             entries = count_noun(entry_count, "entry", "entries")
             if last_appended:
-                print(f"Progress journal: {entries}, last appended {last_appended}")
+                print(
+                    f"Progress journal: {entries}, last appended {_when(last_appended)}"
+                )
             else:
                 print(f"Progress journal: {entries}")
 
@@ -282,7 +394,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             f"elapsed {format_duration_seconds(active_turn.get('elapsed_seconds'))} "
             f"idle {format_duration_seconds(active_turn.get('idle_seconds'))}"
         )
-        print(f"  Last activity: {active_turn.get('last_activity_at') or 'none'}")
+        print(f"  Last activity: {_when(active_turn.get('last_activity_at'), 'none')}")
         action_required = active_turn.get("action_required")
         if isinstance(action_required, dict):
             print(
@@ -336,7 +448,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             f"question {question_id} "
             f"session {_session_label_from_payload(waiting_for_reply)} "
             f"turn {waiting_for_reply.get('turn_index')} "
-            f"since {waiting_for_reply.get('started_at') or 'unknown'}"
+            f"since {_when(waiting_for_reply.get('started_at'))}"
         )
         base_deadline = waiting_for_reply.get("base_deadline")
         ceiling_deadline = waiting_for_reply.get("unsupervised_deadline_at")
@@ -347,8 +459,8 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         if base_deadline or ceiling_deadline:
             print(
                 "  Deadlines: "
-                f"base {base_deadline or 'unknown'}, "
-                f"{ceiling_label} {ceiling_deadline or 'unknown'}"
+                f"base {_when(base_deadline)}, "
+                f"{ceiling_label} {_when(ceiling_deadline)}"
             )
         print(f"  Status: {waiting_status}")
 

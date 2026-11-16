@@ -69,6 +69,7 @@ def _recent_failure_entry(
         "harness": _string_or_none(facts.get("harness")),
         "origin": _string_or_none(facts.get("origin")),
         "outcome": _string_or_none(end.get("outcome")),
+        "reason": _string_or_none(end.get("reason")),
         "exit_code": end.get("exit_code")
         if isinstance(end.get("exit_code"), int)
         else None,
@@ -145,6 +146,7 @@ def collect_cli_invocations(
     by_harness: dict[str, int] = {}
     by_origin: dict[str, int] = {}
     durations: list[float] = []
+    reason_counts: dict[tuple[str, str], int] = {}
     failures: list[tuple[str, str, dict[str, Any]]] = []
 
     for invocation_id, tracked in windowed.items():
@@ -177,6 +179,13 @@ def collect_cli_invocations(
         duration = end.get("duration_ms")
         if isinstance(duration, (int, float)) and not isinstance(duration, bool):
             durations.append(float(duration))
+        reason = _string_or_none(end.get("reason"))
+        if reason is not None and outcome in (
+            cli_trace.OUTCOME_FAILED,
+            cli_trace.OUTCOME_PAUSED,
+        ):
+            key = (_command_label(facts), reason)
+            reason_counts[key] = reason_counts.get(key, 0) + 1
         if outcome in metrics_models.FAILING_OUTCOMES:
             failures.append(
                 (
@@ -200,6 +209,9 @@ def collect_cli_invocations(
         "completions": completions,
         "successes": outcome_counts.get(cli_trace.OUTCOME_OK, 0),
         "nonzero_exits": outcome_counts.get(cli_trace.OUTCOME_FAILED, 0),
+        # A run that stopped at a pause exits nonzero too, but it is the loop
+        # working as designed, so it is counted apart from the failures.
+        "pauses": outcome_counts.get(cli_trace.OUTCOME_PAUSED, 0),
         "usage_errors": outcome_counts.get(cli_trace.OUTCOME_USAGE, 0),
         "help_calls": outcome_counts.get(cli_trace.OUTCOME_HELP, 0),
         "interruptions": outcome_counts.get(cli_trace.OUTCOME_INTERRUPTED, 0),
@@ -221,6 +233,14 @@ def collect_cli_invocations(
             "max": round(ordered_durations[-1], 3) if ordered_durations else None,
             "total": round(sum(ordered_durations), 3),
         },
+        # Which refusals and pauses recur, so the most common blocker of each
+        # command is visible without opening a single run.
+        "failure_reasons": [
+            {"command": command, "reason": reason, "count": count}
+            for (command, reason), count in sorted(
+                reason_counts.items(), key=lambda item: (-item[1], item[0])
+            )[: metrics_models.FAILURE_REASON_LIMIT]
+        ],
         "recent_failures": [
             entry for _, _, entry in failures[: metrics_models.RECENT_FAILURE_LIMIT]
         ],

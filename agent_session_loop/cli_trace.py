@@ -7,7 +7,9 @@ values, message bodies, captured output, and exception messages are never
 assembled into a record, so the trace cannot leak content even if the state
 root is shared or archived. An uncaught exception contributes its class name and
 the ASL source location it was raised from (module, function, line), which is
-code vocabulary rather than content.
+code vocabulary rather than content. A nonzero exit also records the reason slug
+the command noted through ``cli_trace_notes`` (``plan-not-found``,
+``verify-failed``), which is the same kind of vocabulary.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import config, harnesses
+from . import cli_trace_notes, config, harnesses
 
 SCHEMA_VERSION = 1
 
@@ -51,6 +53,11 @@ EVENT_END = "end"
 
 OUTCOME_OK = "ok"
 OUTCOME_FAILED = "failed"
+#: A run that exited nonzero because it stopped at a pause, not because it broke.
+OUTCOME_PAUSED = "paused"
+
+#: The reason recorded for a nonzero exit whose command noted none.
+REASON_UNSPECIFIED = "unspecified"
 OUTCOME_HELP = "help"
 OUTCOME_USAGE = "usage"
 OUTCOME_INTERRUPTED = "interrupted"
@@ -359,6 +366,16 @@ class Invocation:
     ) -> None:
         if self.root is None:
             return
+        reason = None
+        if outcome not in (OUTCOME_OK, OUTCOME_HELP):
+            reason = cli_trace_notes.noted_reason()
+            if outcome == OUTCOME_FAILED and cli_trace_notes.noted_paused():
+                outcome = OUTCOME_PAUSED
+            elif outcome == OUTCOME_FAILED and reason is None:
+                # No failing command goes unexplained silently: one that
+                # noted nothing is recorded as such, so `asl metrics` ranks
+                # the gap beside the real reasons instead of hiding it.
+                reason = REASON_UNSPECIFIED
         record = dict(self.base)
         record.update(
             {
@@ -366,6 +383,7 @@ class Invocation:
                 "timestamp": datetime.now(UTC).isoformat(),
                 "exit_code": exit_code,
                 "outcome": outcome,
+                "reason": reason,
                 "duration_ms": round((time.monotonic() - self.started_at) * 1000, 3),
                 "exception_type": (
                     None if exception is None else type(exception).__name__
@@ -385,6 +403,7 @@ def start(
 ) -> Invocation:
     """Record a start event and return the handle that closes the pair."""
     global _current_invocation_id
+    cli_trace_notes.reset()
     try:
         source = os.environ if env is None else env
         if not enabled(source):

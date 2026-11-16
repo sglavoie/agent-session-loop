@@ -10,13 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_trace_notes,
     plans_errors,
+    plans_files,
     plans_models,
     plans_readiness,
     responses,
 )
 from .cli_defaults import program_name
 from .cli_parser_support import NON_NEGATIVE_NUMBER, flag_refusal
+from .formatting import format_local_timestamp, format_relative_age
 from .plan_pins import load_registry
 from .plan_pins_models import PlanRegistryError
 from .plan_scan import discover_plans
@@ -27,6 +30,7 @@ PLANS_COMMAND_NAME = "plans"
 
 
 def _plans_error(args: Any, *, reason: str, error: str) -> int:
+    cli_trace_notes.note_reason(reason)
     if getattr(args, "json", False):
         responses.print_json(
             responses.error_payload(
@@ -106,6 +110,19 @@ def _plan_matches_stale_days(
         return False
 
 
+def _activity_text(stamp: str | None) -> str:
+    """``stamp`` in local time with how long ago it was, or ``unknown``."""
+    if not stamp:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return stamp
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return f"{format_local_timestamp(parsed)} ({format_relative_age(parsed)})"
+
+
 def _print_plan_listing(
     rows: Sequence[tuple[PlanSummary, dict[str, str] | None]],
     *,
@@ -118,7 +135,17 @@ def _print_plan_listing(
     for summary, readiness in rows:
         counts = summary.counts
         print(f"- {summary.plan_dir}")
-        print(f"  state: {summary.primary_state}")
+        title = summary.label or plans_files.read_plan_title(summary.plan_dir)
+        if title:
+            print(f"  title: {title}")
+        # A stopped plan says why here, so "failed" beside a full session
+        # count (unresolved review findings, say) explains itself.
+        reason = (
+            f" ({summary.concise_reason})"
+            if summary.urgency_group == "needs-action" and summary.concise_reason
+            else ""
+        )
+        print(f"  state: {summary.primary_state}{reason}")
         print(
             "  sessions: "
             f"pending={counts.get('pending', 0)} "
@@ -130,7 +157,7 @@ def _print_plan_listing(
         )
         print(
             "  activity: "
-            f"{_plan_effective_activity_at(summary, readiness) or 'unknown'}"
+            f"{_activity_text(_plan_effective_activity_at(summary, readiness))}"
         )
         next_pending = summary.next_pending_session_id or "(none)"
         print(f"  next pending session: {next_pending}")
@@ -231,6 +258,7 @@ def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
             continue
 
         payload = summary.to_payload()
+        payload["title"] = plans_files.read_plan_title(summary.plan_dir)
         if readiness_filter is not None:
             payload["readiness"] = dict(readiness) if readiness is not None else None
         rows.append((summary, readiness))

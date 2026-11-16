@@ -12,11 +12,12 @@ asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-mod
 asl prepare --resume PLAN_DIR [--rebind-workspace ...]
 asl expand-ingest PLAN_DIR --batch-file PATH [--json]
 asl register-repositories (PLAN_DIR | --plan-file PATH | --inline-stdin) [--cwd ROOT] [--output PATH] [--state-dir DIR] [--json]
+asl home [--state-dir DIR] [--json]
 asl plans [--state-dir DIR] [--stale-days N] [--never-run] [--readiness STATE] [--json]
 asl status PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl questions PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl review-verdict PLAN_DIR_OR_ID [--state-dir DIR] [--json]
-asl tail PLAN_DIR_OR_ID [--state-dir DIR] [--lines N] [--no-follow] [--json]
+asl tail PLAN_DIR_OR_ID [--state-dir DIR] [--lines N] [--no-follow] [--all] [--json]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor (PLAN_DIR | --plan-dir PLAN_DIR) --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd ROOT] [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]
@@ -74,6 +75,64 @@ asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [
 asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--raises TOPIC ...] [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl overseer reconcile PLAN_DIR [--timeout SECONDS] [--state-dir DIR] [--json]
 ```
+
+### Home, plan names and the status headline
+
+Running `asl` with no command is `asl home`: what is running, what needs
+you, and what finished in the last three days, one plan per row and each named
+by its title. A plan that stopped more than a week ago is counted, not listed,
+so old history cannot bury today's work; `asl plans` still lists every plan.
+`asl home --json` carries the same sections as `running`, `needs_you`,
+`needs_you_older`, `ready`, `finished`, `finished_more`, `assurance_open` and
+`assurance_most_seen`.
+
+Plan directories are named by hash, so every `PLAN_DIR_OR_ID` argument also
+accepts a shorthand. In order: an existing directory, the exact label
+`asl sessions` prints, a unique prefix of that label (`asl status 213a`), then
+a case-insensitive fragment of the plan title (`asl status "pi tools"`). A
+shorthand that picks one plan says which on stderr before the command runs;
+one that matches several lists them by title and changes nothing. A shorthand
+is only answered from the default plan directories when the default state root
+is in use.
+
+`asl status` opens with a three-line headline (the title, how many sessions
+are complete and what is happening now, and whether anything is waiting on a
+person) ahead of the detail block. Every moment the text form prints is in
+local time with its UTC offset, as in `asl sessions` and `asl tail`; `--json`
+keeps the stored UTC strings. `asl plans` prints each plan's `title:`,
+the reason beside a `failed`, `stale` or paused state, and its last activity
+in local time with its age; `asl plans --json` adds `title` to each plan.
+
+`asl run` without `--cwd` starts in the directory the plan was prepared for
+and says so, instead of refusing the directory the shell happened to be in. A
+stated `--cwd` that disagrees with the plan is still refused, and the refusal
+names the `--cwd` to use.
+
+When a run ends, its last line is a `Summary:` naming the plan by title with
+its session count, duration, commits made and review verdict. A
+`verify-failed` pause names each failed check and prints the last lines of its
+stdout and stderr, and a paused run ends with the exact `Resume with:` or
+`Recover with:` command.
+
+`asl assurance list` shows how long ago each issue was last and first seen,
+and ends by naming the open issue seen most often with the command that opens
+it and the three that take it off the list (`resolve`, `dismiss`,
+`accept-risk`). `asl home` names that same issue beside the open count, and
+`asl home --json` carries it as `assurance_most_seen`.
+
+On macOS, `asl run` posts one desktop notification as it exits when someone
+should know: the plan finished after a run of 30 seconds or more, the run
+paused and only a person can clear it, or a directly launched run stopped for
+another reason after that long. A recoverable pause under a supervisor is not
+announced, because the supervisor retries it. Set `ASL_DESKTOP_NOTIFY=0` to
+turn notifications off, for instance when the Agent Mux cockpit already
+announces these.
+
+`asl tail` leaves out routine bookkeeping by default (finalization
+heartbeats, conversation continuations, commit-group updates, and Agent Mux
+deliveries that were accepted), so its lines are spent on what the run did. A
+delivery that failed is always shown. `--all` shows everything, and `--json`
+is unfiltered.
 
 ### Flag conventions
 

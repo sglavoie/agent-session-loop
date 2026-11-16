@@ -74,6 +74,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -159,12 +161,53 @@ def _all_sessions_complete(snapshot: plans_models.PlanSnapshot) -> bool:
     return all(session.status == "complete" for session in snapshot.sessions)
 
 
+def _prepared_root_for_unstated_cwd(args: argparse.Namespace, cwd: Path) -> Path | None:
+    """The plan's prepared root, when no ``--cwd`` was stated and it differs.
+
+    ``--cwd`` left at its ``.`` default states no intent about where to run,
+    and a prepared plan already records where it belongs. Returns that root
+    only when it is a real directory other than ``cwd``; an unreadable plan,
+    an unbound one, or a stated ``--cwd`` returns ``None`` and the ordinary
+    checks report whatever is wrong.
+    """
+    if getattr(args, "cwd", None) != ".":
+        return None
+    try:
+        metadata = plans_metadata.load_plan_metadata(args.plan_dir)
+    except plans_errors.PlanError, OSError, ValueError:
+        return None
+    if isinstance(metadata, plans_metadata.WorkspacePlanMetadata):
+        stored = metadata.workspace_root
+    elif isinstance(metadata, plans_metadata.PlanMetadata):
+        stored = metadata.cwd
+    else:
+        return None
+    try:
+        root = plans_files.canonicalize_path(stored)
+        if root == cwd or not root.is_dir():
+            return None
+    except OSError, ValueError:
+        return None
+    return root
+
+
 def _validate_run_inputs(
     args: argparse.Namespace,
     *,
     resolve_review_guard_excludes: ReviewGuardExcludeResolver,
 ) -> tuple[Path, int | None, int | None, str | None]:
     cwd = plans_files.canonicalize_path(args.cwd)
+    bound = _prepared_root_for_unstated_cwd(args, cwd)
+    if bound is not None:
+        # Nothing is re-pointed: the stored binding is still the one checked
+        # below. The run simply starts where the plan says it belongs instead
+        # of refusing the directory the shell happened to be in.
+        print(
+            f"Running in {bound}, the directory this plan was prepared for.",
+            file=sys.stderr,
+        )
+        cwd = bound
+        args.cwd = str(bound)
     if not cwd.is_dir():
         raise plans_errors.PlanError(f"cwd does not exist or is not a directory: {cwd}")
 
@@ -239,7 +282,8 @@ def _resolve_run_verification_context(
             cwd
         ):
             raise plans_errors.PlanError(
-                f"run cwd does not match stored plan metadata: {cwd} != {metadata.cwd}"
+                f"run cwd does not match stored plan metadata: {cwd} != "
+                f"{metadata.cwd}; rerun with --cwd {shlex.quote(metadata.cwd)}"
             )
         return verification_models.VerificationContext.legacy(cwd, plan_dir=plan_dir)
 

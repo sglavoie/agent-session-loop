@@ -11,7 +11,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from agent_session_loop import config, harnesses, plans_files
+from agent_session_loop import config, formatting, harnesses, plans_files
 from tests.support import (
     REPO_ROOT,
     _write_state_payload,
@@ -215,7 +215,14 @@ class JsonPlansListingCliTests(JsonCliHelpers, unittest.TestCase):
                     "--state-dir", str(tmp_dir / "state")
                 )
             self.assertEqual(0, code, stderr)
-            self.assertIn("  activity: 2026-07-01T00:00:00+00:00", stdout)
+            # Local time with its offset, then the age: the reader's clock,
+            # never a bare UTC stamp.
+            moment = datetime(2026, 7, 1, tzinfo=UTC)
+            self.assertIn(
+                f"  activity: {formatting.format_local_timestamp(moment)} (", stdout
+            )
+            self.assertIn("d ago)", stdout)
+            self.assertIn("  title: Manifest", stdout)
 
     def test_plans_cli_stale_and_never_run_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

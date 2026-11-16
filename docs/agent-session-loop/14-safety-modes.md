@@ -131,16 +131,24 @@ A record carries only vocabulary the parser already owns plus process facts:
 `schema_version`, `event`, `invocation_id`, `timestamp`, `pid`, `command_path`
 (recognized subcommand names), `options` (recognized option names), `help_depth`,
 `harness`, `origin`, and — on the `end` record — `exit_code`, `outcome`,
-`duration_ms`, `exception_type`, and `exception_site` (the innermost ASL frame
-an uncaught exception passed through, as `<module>.<function>:<line>`). Raw argv,
+`duration_ms`, `exception_type`, `exception_site` (the innermost ASL frame
+an uncaught exception passed through, as `<module>.<function>:<line>`), and
+`reason` (the kebab-case reason slug the command reported for a nonzero exit,
+such as `plan-not-found` or `verify-failed`, or null; anything that is not
+such a slug is dropped). A failed command that noted no reason is recorded
+as `unspecified`, so a gap in coverage shows up in `asl metrics` rather than
+as a missing value. A command notes its reason in text mode as well as
+under `--json`, so the trace does not depend on how the command was asked to
+print. Raw argv,
 option values, positional values, unknown tokens, paths, environment values,
 message bodies, captured output, and exception messages are never assembled into
 a record, so a trace file cannot leak content. An option value is counted and skipped rather than inspected,
 which is why `--state-dir metrics` cannot promote `metrics` into the command
 path.
 
-`outcome` is one of `ok`, `failed`, `help`, `usage`, `interrupted`, or
-`exception`. `help_depth` is `root`, `group`, or `leaf` on a `--help` exit and
+`outcome` is one of `ok`, `failed`, `paused`, `help`, `usage`, `interrupted`,
+or `exception`. `paused` is a run that exited nonzero because it stopped at a
+pause; its exit status is unchanged, only the trace tells it from a failure. `help_depth` is `root`, `group`, or `leaf` on a `--help` exit and
 null otherwise. `origin` comes from the internal `ASL_INVOCATION_ORIGIN`
 allowlist (`direct`, `autopilot`, `plan-launch`, `install-verify`); any other
 value is recorded as `other`, and an unset variable means `direct`.

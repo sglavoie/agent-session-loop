@@ -93,8 +93,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 output,
             )
             self.assertIn(
-                "Deadlines: base 2026-07-24T12:05:00+00:00, "
-                "hard 2026-07-24T12:15:00+00:00",
+                "Deadlines: base "
+                + state_status_text._when("2026-07-24T12:05:00+00:00")
+                + ", hard "
+                + state_status_text._when("2026-07-24T12:15:00+00:00"),
                 output,
             )
 
@@ -451,8 +453,10 @@ class ParserAndStateTests(ParserAndStateTestsBase):
                 state_status_text._print_text_status(payload)
 
             self.assertIn(
-                "Deadlines: base 2026-07-24T12:05:00+00:00, "
-                "unsupervised 2026-07-24T12:30:00+00:00",
+                "Deadlines: base "
+                + state_status_text._when("2026-07-24T12:05:00+00:00")
+                + ", unsupervised "
+                + state_status_text._when("2026-07-24T12:30:00+00:00"),
                 buffer.getvalue(),
             )
 

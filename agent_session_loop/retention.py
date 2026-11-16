@@ -23,6 +23,7 @@ from typing import Any
 from . import (
     assurance_ledger,
     assurance_report,
+    cli_trace_notes,
     plans_errors,
     plans_snapshot,
     responses,
@@ -409,6 +410,7 @@ def _print_report(report: GCReport) -> None:
 
 def _print_gc_error(args: argparse.Namespace, *, reason: str, error: str) -> int:
     """Report one ``asl gc`` refusal in the common error envelope; returns 1."""
+    cli_trace_notes.note_reason(reason)
     if getattr(args, "json", False):
         plan_dir = getattr(args, "plan_dir", None)
         responses.print_json(

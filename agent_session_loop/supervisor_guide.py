@@ -14,7 +14,7 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-from . import harnesses, responses
+from . import cli_trace_notes, harnesses, responses
 from .cli_defaults import program_name
 from .cli_parser_support import flag_refusal
 
@@ -369,6 +369,7 @@ def supervisor_guide_from_args(args: argparse.Namespace) -> int:
             f"must be one of {', '.join((AUTO_HARNESS, *harnesses.HARNESS_NAMES))}",
             args.harness,
         )
+        cli_trace_notes.note_reason("input-error")
         if args.json:
             responses.print_json(
                 responses.error_payload(COMMAND_NAME, reason="input-error", error=error)

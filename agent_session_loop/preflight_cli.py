@@ -7,6 +7,7 @@ import sys
 from datetime import UTC, datetime
 
 from . import (
+    cli_trace_notes,
     progress_repair,
     responses,
 )
@@ -315,7 +316,25 @@ def preflight_from_args(args: argparse.Namespace) -> int:
         )
 
     if not report.ok:
+        # The trace records which gate refused, not merely that one did: the
+        # category of the first red finding, else of the first yellow one. It
+        # is what `asl metrics` ranks to show the most common blocker.
+        blocking = sorted(
+            (
+                finding
+                for finding in report.findings
+                if finding.severity in {"red", "yellow"}
+            ),
+            key=lambda finding: finding.severity != "red",
+        )
+        if blocking:
+            cli_trace_notes.note_reason(blocking[0].category)
         return 1
     if mark_loop_ready and not marked:
+        cli_trace_notes.note_reason(
+            PREFLIGHT_EXIT_REASON_MARK_FAILED
+            if mark_error is not None
+            else PREFLIGHT_EXIT_REASON_MARK_REFUSED
+        )
         return 1
     return 0

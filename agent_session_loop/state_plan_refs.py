@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -169,6 +170,84 @@ def iter_plan_state_dirs(state_root: Path) -> Iterator[Path]:
             continue
 
 
+def shorthand_ambiguity_text(error: AmbiguousPlanError) -> str | None:
+    """A readable, one-plan-per-line refusal for an ambiguous shorthand.
+
+    ``None`` for an exact label that several directories share, whose
+    one-line message already says everything there is to say.
+    """
+    if not error.titles:
+        return None
+    lines = [f"{error.label!r} matches {len(error.candidates)} plans; say more of one:"]
+    for candidate in error.candidates:
+        title = error.titles.get(str(candidate), "")
+        lines.append(f"  {candidate.name}  {title}".rstrip())
+    return "\n".join(lines)
+
+
+def _loose_candidates(state_root: Path) -> list[Path]:
+    """Every known plan directory a shorthand may name.
+
+    The default plan directories are scanned only beside the default state
+    root: a caller that points at its own state root (a test, a sandbox) asked
+    for that corpus, and must not have a shorthand answered from the user's
+    real plans.
+    """
+    from . import config, plan_scan
+
+    try:
+        default_root = config.default_state_root().resolve()
+        include_defaults = state_root.resolve() == default_root
+        discovery = plan_scan.discover_plans(
+            state_root=state_root, include_default_dirs=include_defaults
+        )
+    except StateError, OSError, ValueError:
+        return []
+    candidates: list[Path] = []
+    for plan in discovery.plans:
+        try:
+            if plan.plan_dir.is_dir():
+                candidates.append(plan.plan_dir)
+        except OSError:
+            continue
+    return candidates
+
+
+def _resolve_loose_reference(raw_value: str, state_root: Path) -> Path | None:
+    """Resolve a shorthand: a directory-name prefix, else words from the title.
+
+    Plan directories are named by hash, so the exact label is something to
+    copy, not to type. A unique prefix of the directory name wins; failing
+    that, a case-insensitive fragment of the plan title. One match is announced
+    on stderr and returned, so the reader sees which plan a shorthand picked;
+    several raise :class:`AmbiguousPlanError` naming each by title; none
+    returns ``None``.
+    """
+    candidates = _loose_candidates(state_root)
+    matched = [plan for plan in candidates if plan.name.startswith(raw_value)]
+    titles: dict[str, str] = {}
+    if not matched:
+        needle = raw_value.casefold()
+        for plan in candidates:
+            title = plans_files.read_plan_title(plan)
+            if title is not None and needle in title.casefold():
+                matched.append(plan)
+                titles[str(plan)] = title
+    if not matched:
+        return None
+    if len(matched) > 1:
+        for plan in matched:
+            title = titles.get(str(plan)) or plans_files.read_plan_title(plan)
+            if title is not None:
+                titles[str(plan)] = title
+        raise AmbiguousPlanError(raw_value, matched, state_root, titles=titles)
+    (plan,) = matched
+    title = titles.get(str(plan)) or plans_files.read_plan_title(plan)
+    described = f"{plan.name} ({title})" if title else plan.name
+    print(f"{raw_value!r} resolved to plan {described}", file=sys.stderr)
+    return plan
+
+
 def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
     """Resolve a plan argument to a plan directory, honoring direct paths.
 
@@ -178,6 +257,10 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
     bare, nonexistent label scans the state corpus under ``state_root``,
     matching persisted ``plan_dir`` basenames exactly and case-sensitively
     against existing plan directories.
+
+    When no basename matches exactly, a shorthand is tried: a unique prefix of
+    a plan directory name, then a fragment of a plan title (see
+    :func:`_resolve_loose_reference`).
 
     Returns the sole matching plan directory, or the canonicalized argument
     when nothing matches. Raises :class:`AmbiguousPlanError` when more than one
@@ -210,7 +293,7 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
                 matches[key] = candidate
 
     if not matches:
-        return original
+        return _resolve_loose_reference(raw_value, state_root) or original
     if len(matches) == 1:
         return next(iter(matches.values()))
     raise AmbiguousPlanError(raw_value, list(matches.values()), state_root)

@@ -75,6 +75,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_trace_notes,
     config,
     harnesses,
     plans_errors,
@@ -109,6 +110,7 @@ def _print_doctor_error(
     plan_dir: Path | None = None,
     details: dict[str, Any] | None = None,
 ) -> int:
+    cli_trace_notes.note_reason(reason)
     if args.json:
         payload = responses.error_payload(
             "doctor",

@@ -1,5 +1,5 @@
 # ruff: noqa: F403, F405
-from . import cli_common
+from . import cli_common, cli_trace_notes
 from .cli_defaults import program_name
 from .plans_files import read_input_text
 from .repository_registration_derivation import (
@@ -36,6 +36,7 @@ def result_payload(result: RegistrationResult) -> dict[str, Any]:
 def _emit_register_error(
     reason: str, error: str, *, want_json: bool, **fields: Any
 ) -> int:
+    cli_trace_notes.note_reason(reason)
     if want_json:
         responses.print_json(
             responses.error_payload(

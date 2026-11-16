@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    cli_trace_notes,
     events,
     harnesses,
     plans_errors,
@@ -45,7 +46,11 @@ from .state_payloads import (
     _session_payload,
     _status_counts,
 )
-from .state_plan_refs import is_bare_label, resolve_plan_reference
+from .state_plan_refs import (
+    is_bare_label,
+    resolve_plan_reference,
+    shorthand_ambiguity_text,
+)
 from .state_status_text import _print_text_status
 
 
@@ -291,6 +296,7 @@ def status_from_args(args: argparse.Namespace) -> int:
         snapshot = plans_snapshot.inspect_plan(resolved_plan_dir)
         payload = status_payload(snapshot, args.state_dir)
     except AmbiguousPlanError as error:
+        cli_trace_notes.note_reason("ambiguous-plan")
         if args.json:
             responses.print_json(
                 responses.error_payload(
@@ -307,6 +313,8 @@ def status_from_args(args: argparse.Namespace) -> int:
                     plan_reference=str(args.plan_dir),
                 )
             )
+        elif (shorthand := shorthand_ambiguity_text(error)) is not None:
+            print(f"{program_name()} status: {shorthand}", file=sys.stderr)
         else:
             print(
                 f"{program_name()} status: {error}; "
@@ -315,6 +323,7 @@ def status_from_args(args: argparse.Namespace) -> int:
             )
         return 1
     except (plans_errors.PlanError, StateError) as error:
+        cli_trace_notes.note_reason(plans_errors_reason(error))
         if args.json:
             reason = plans_errors_reason(error)
             responses.print_json(

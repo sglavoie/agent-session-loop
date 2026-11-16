@@ -45,6 +45,7 @@ import json
 import sys
 
 from . import (
+    cli_trace_notes,
     metrics_collection,
     metrics_models,
     metrics_render,
@@ -140,6 +141,13 @@ def metrics_from_args(args: argparse.Namespace) -> int:
             since_days=since_days,
         )
     except (OSError, ValueError) as error:
+        cli_trace_notes.note_reason(
+            "input-error"
+            if isinstance(error, _InvalidSinceDays)
+            else "os-error"
+            if isinstance(error, OSError)
+            else "metrics-error"
+        )
         if getattr(args, "json", False):
             responses.print_json(
                 responses.error_payload(

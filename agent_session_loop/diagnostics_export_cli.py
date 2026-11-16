@@ -1,5 +1,6 @@
 """Focused portion of agent_session_loop/diagnostics_export.py."""
 
+from . import cli_trace_notes
 from .cli_defaults import program_name
 from .diagnostics_export_build import *
 
@@ -45,6 +46,7 @@ def export_from_args(args: argparse.Namespace) -> int:
         # its own profile, and a caller that forgot to name one must not silently
         # receive AgentMux's.
         message = "no export profile selected; pass --agent-mux"
+        cli_trace_notes.note_reason(REASON_NO_PROFILE)
         if getattr(args, "json", False):
             responses.print_json(
                 responses.error_payload(
@@ -72,6 +74,7 @@ def export_from_args(args: argparse.Namespace) -> int:
             _write_output(output, payload)
         except OSError as error:
             message = f"could not write export to {output}: {error}"
+            cli_trace_notes.note_reason(REASON_WRITE_FAILED)
             if getattr(args, "json", False):
                 responses.print_json(
                     responses.error_payload(

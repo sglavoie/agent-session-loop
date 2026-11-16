@@ -297,6 +297,22 @@ spawn and cannot consume provider quota. Probes are memoized in process on
 by `ASL_HARNESS_VERSION_PROBE=0` — in which case every harness degrades to
 `unknown`.
 
+A version the window cannot vouch for is the usual case, because harness CLIs
+update themselves more often than the window moves. So an `unknown` row also
+says what this machine's own runs know: how many turns completed on that exact
+version in the last 30 days, or that none has. The count is a floor (each plan
+keeps only its latest run). Ten or more completed turns prove the version
+here, and the text report then marks the row `ok` instead of `warn`: a
+warning is kept for a version neither the window nor this machine vouches
+for. A harness that has not run here at all in that window is marked `idle`
+rather than `warn`: its version cannot affect a run until it is used, and the
+first run that selects it reports the version in preflight. The classification, the JSON `status` and the `--strict` exit follow the
+pinned window alone, because a release gate asks what was smoke-tested. Under
+`--json` the evidence is each harness's `local_evidence` object
+(`completed_turns`, `runs`, `window_days`, `proven`, `harness_turns`,
+`in_use`), null for a version the
+window already covers.
+
 Unknown warns, known-incompatible blocks. Default exit is 0 when nothing is
 `incompatible` and 1 when something is; `--strict` also fails an `unknown`
 harness, exiting 3 when nothing is incompatible (an incompatible one still exits

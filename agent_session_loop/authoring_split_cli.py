@@ -10,6 +10,7 @@ from typing import Any
 
 from . import (
     cli_common,
+    cli_trace_notes,
     harnesses,
     repository_intent,
     responses,
@@ -102,6 +103,7 @@ def _resolve_skill_prefix(skill_prefix: str) -> str:
 def _emit_split_error(
     reason: str, error: str, *, want_json: bool, **fields: Any
 ) -> int:
+    cli_trace_notes.note_reason(reason)
     if want_json:
         responses.print_json(
             responses.error_payload(
@@ -180,6 +182,11 @@ def check_from_args(args: Any) -> int:
             )
 
     if result.findings:
+        cli_trace_notes.note_reason(
+            SPLIT_REASON_REGISTRY_REQUIRED
+            if registry_required
+            else SPLIT_REASON_MALFORMED_PLAN
+        )
         if want_json:
             responses.print_json(
                 responses.error_payload(

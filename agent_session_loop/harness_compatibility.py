@@ -46,7 +46,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from . import harnesses, responses
+from . import harness_local_evidence, harnesses, responses
 from .harnesses import HARNESS_NAMES, HarnessName
 
 #: Schema version of the :func:`report_payload` document. Consumers (the
@@ -549,16 +549,45 @@ def exit_code(results: Sequence[Compatibility], *, strict: bool) -> int:
     return 0
 
 
-def _format_text(results: Sequence[Compatibility]) -> str:
+def _format_text(
+    results: Sequence[Compatibility],
+    evidence: Mapping[str, dict[str, Any] | None] | None = None,
+) -> str:
     marks = {"supported": "ok", "unknown": "warn", "incompatible": "BLOCK"}
     lines = []
     for result in results:
         version = result.version or "unknown"
+        found = (evidence or {}).get(result.harness)
+        local = harness_local_evidence.describe(found)
+        mark = marks[result.status]
+        if result.status == "unknown" and harness_local_evidence.proven(found):
+            # Outside the smoke-tested window but proven by this machine's own
+            # runs: not a warning. `--strict` and the JSON status still follow
+            # the pinned window, which is what a release gate asks about.
+            mark = "ok"
+        elif result.status == "unknown" and not harness_local_evidence.in_use(found):
+            # Installed but never launched here: say so plainly instead of
+            # warning. The day it is used, the first preflight reports its
+            # version, and this row warns until turns have completed on it.
+            mark = "idle"
         lines.append(
-            f"{marks[result.status]:>5}  {result.harness:<8} {version:<12} "
-            f"{result.reason}: {result.detail}"
+            f"{mark:>5}  {result.harness:<8} {version:<12} "
+            f"{result.reason}: {result.detail}{local}"
         )
     return "\n".join(lines)
+
+
+def _local_evidence(
+    results: Sequence[Compatibility], state_dir: str | None
+) -> dict[str, dict[str, Any] | None]:
+    """Local run evidence for each version the pinned window cannot vouch for."""
+    return {
+        result.harness: harness_local_evidence.completed_turns(
+            result.harness, result.version, state_dir=state_dir
+        )
+        for result in results
+        if result.status == "unknown" and result.version
+    }
 
 
 def harness_compat_from_args(args: argparse.Namespace) -> int:
@@ -566,8 +595,12 @@ def harness_compat_from_args(args: argparse.Namespace) -> int:
     requested: tuple[HarnessName, ...] = tuple(getattr(args, "harness", None) or ())
     results = check_all(requested or None)
     strict = bool(getattr(args, "strict", False))
+    evidence = _local_evidence(results, getattr(args, "state_dir", None))
     if getattr(args, "json", False):
-        responses.print_json(report_payload(results, strict=strict))
+        payload = report_payload(results, strict=strict)
+        for row in payload["harnesses"]:
+            row["local_evidence"] = evidence.get(row["harness"])
+        responses.print_json(payload)
     else:
-        print(_format_text(results))
+        print(_format_text(results, evidence))
     return exit_code(results, strict=strict)

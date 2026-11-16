@@ -42,6 +42,7 @@ ALLOWED_START_FIELDS = frozenset(
 ALLOWED_END_FIELDS = ALLOWED_START_FIELDS | {
     "exit_code",
     "outcome",
+    "reason",
     "duration_ms",
     "exception_type",
     "exception_site",

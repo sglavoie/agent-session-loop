@@ -257,9 +257,12 @@ class RunReviewFinalReviewPauseTests(RunReviewHarnessLifecycleBase):
             plans_files.canonicalize_path(self.plan_dir)
         )
         self.assertIn(f"Review: {expected_path}", completed.stdout)
-        self.assertEqual(
-            "Status: All clear, no findings",
-            completed.stdout.splitlines()[-1],
+        # The verdict line, then the summary that closes every finished run.
+        last_lines = completed.stdout.splitlines()[-2:]
+        self.assertEqual("Status: All clear, no findings", last_lines[0])
+        self.assertTrue(last_lines[1].startswith("Summary: Manifest — "), last_lines)
+        self.assertTrue(
+            last_lines[1].endswith("review: All clear, no findings"), last_lines
         )
         self.assertIn("session 1/1 started", completed.stderr)
         self.assertIn("review session started (2/2)", completed.stderr)

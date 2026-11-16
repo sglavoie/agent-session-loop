@@ -8,7 +8,13 @@ INTERRUPTED_EXIT = 130
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
-HANG_TRIGGER_IDLE_SECONDS = 120.0
+#: How long a turn may be silent before its CPU is sampled for a hang. Two
+#: minutes proved too eager: over 30 days of real runs every one of the 50
+#: ``zero_cpu_idle`` suspicions cleared by itself, most within three minutes,
+#: because a model thinking between tool calls is silent and idle too. Five
+#: minutes skips that ordinary quiet and still names a real hang long before
+#: the session timeout does. ``ASL_HANG_TRIGGER_IDLE_SECONDS`` overrides it.
+HANG_TRIGGER_IDLE_SECONDS = 300.0
 
 
 HANG_CONFIRM_SAMPLES = 2

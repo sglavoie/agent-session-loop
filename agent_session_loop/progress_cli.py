@@ -22,6 +22,7 @@ from typing import Any, TextIO
 
 from . import (
     cli_common,
+    cli_trace_notes,
     plans_errors,
     plans_files,
     plans_models,
@@ -61,6 +62,7 @@ def backfill_progress_from_args(args: argparse.Namespace) -> int:
     as_json = bool(getattr(args, "json", False))
 
     def refuse(reason: str, error: object) -> int:
+        cli_trace_notes.note_reason(reason)
         if as_json:
             responses.print_json(
                 responses.error_payload(
@@ -188,6 +190,7 @@ def progress_from_args(args: argparse.Namespace) -> int:
     plan_dir_arg = args.plan_dir
     want_json: bool = args.json
     follow: bool = args.tail
+    cli_trace_notes.note_reason("input-error")
     if want_json and follow:
         # The journal is Markdown; following it streams text, so there is no
         # JSON document `--tail` could keep printing.
@@ -210,6 +213,11 @@ def progress_from_args(args: argparse.Namespace) -> int:
     try:
         plans_snapshot.require_plan_directory(plan_dir)
     except plans_errors.PlanError as error:
+        cli_trace_notes.note_reason(
+            "plan-not-found"
+            if isinstance(error, plans_errors.PlanNotFoundError)
+            else "malformed-plan"
+        )
         if want_json:
             responses.print_json(
                 responses.error_payload(
@@ -229,6 +237,7 @@ def progress_from_args(args: argparse.Namespace) -> int:
             print(f"{program_name()} progress: {error}", file=sys.stderr)
         return 1
 
+    cli_trace_notes.note_reason("malformed-progress-journal")
     if want_json:
         try:
             entries = plans_progress.read_progress_entries(plan_dir)

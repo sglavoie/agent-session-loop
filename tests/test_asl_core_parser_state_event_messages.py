@@ -486,12 +486,23 @@ class ParserAndStateTests(ParserAndStateTestsBase):
 
             self.assertEqual("Durable plan title", snapshot.plan_title)
             self.assertEqual("Durable plan title", payload["plan_title"])
+            lines = buffer.getvalue().splitlines()
+            # The headline: the title, where the plan stands, who it waits on.
+            self.assertEqual(
+                [
+                    "Durable plan title",
+                    "  0 of 1 sessions complete · not running; next is session 1",
+                    "  Nothing needs you.",
+                    "",
+                ],
+                lines[:4],
+            )
             self.assertEqual(
                 [
                     "Plan title: Durable plan title",
                     f"Plan: {plans_files.canonicalize_path(plan_dir)}",
                 ],
-                buffer.getvalue().splitlines()[:2],
+                lines[4:6],
             )
 
     def test_inspect_plan_title_falls_back_to_directory_name(self) -> None:

@@ -7,7 +7,7 @@ import json
 import math
 import sys
 
-from . import responses, retention, retention_projection
+from . import cli_trace_notes, responses, retention, retention_projection
 from .cli_defaults import program_name
 from .cli_parser_support import NON_NEGATIVE_NUMBER, POSITIVE_NUMBER, flag_refusal
 from .maintenance_job import JobStatus, install_job, job_status, uninstall_job
@@ -181,6 +181,7 @@ def _fail(command: str, error: Exception, args: argparse.Namespace) -> int:
     ``command`` is the hyphenated JSON identifier (``maintenance-run``); the
     text form names the leaf the way it was typed (``asl maintenance run:``).
     """
+    cli_trace_notes.note_reason(_failure_reason(error))
     if getattr(args, "json", False):
         responses.print_json(
             responses.error_payload(

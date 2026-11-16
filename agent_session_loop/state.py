@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,11 +56,20 @@ class AmbiguousPlanError(StateError):
         label: str,
         candidates: list[Path],
         state_root: Path,
+        *,
+        titles: Mapping[str, str] | None = None,
     ) -> None:
         self.label = label
         self.candidates = sorted(candidates, key=str)
         self.state_root = state_root
-        joined = ", ".join(str(candidate) for candidate in self.candidates)
+        named = dict(titles or {})
+        self.titles = named
+        joined = ", ".join(
+            f"{candidate} ({named[str(candidate)]})"
+            if str(candidate) in named
+            else str(candidate)
+            for candidate in self.candidates
+        )
         super().__init__(
             f"plan label {label!r} is ambiguous under {state_root}: matches {joined}"
         )

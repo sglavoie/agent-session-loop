@@ -36,7 +36,7 @@ import math
 import sys
 from typing import Any, TypedDict
 
-from . import responses
+from . import cli_trace_notes, responses
 from .baseline_cache import BASELINE_RESULTS_FILENAME as BASELINE_RESULTS_FILENAME
 from .baseline_cache import BaselineCache as BaselineCache
 from .baseline_cache import BaselineRecord as BaselineRecord
@@ -228,6 +228,7 @@ def _emit_baseline_error(
     per_check_timeout: float | None,
     total_timeout: float | None,
 ) -> None:
+    cli_trace_notes.note_reason(reason)
     if want_json:
         responses.print_json(
             responses.error_payload(

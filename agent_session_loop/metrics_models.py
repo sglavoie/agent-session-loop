@@ -39,6 +39,7 @@ RECENT_FAILURE_FIELDS = (
     "harness",
     "origin",
     "outcome",
+    "reason",
     "exit_code",
     "duration_ms",
     "exception_type",
@@ -47,6 +48,9 @@ RECENT_FAILURE_FIELDS = (
 
 
 RECENT_FAILURE_LIMIT = 10
+
+#: How many (command, reason) pairs the failure-reason ranking keeps.
+FAILURE_REASON_LIMIT = 10
 
 
 FAILING_OUTCOMES = (

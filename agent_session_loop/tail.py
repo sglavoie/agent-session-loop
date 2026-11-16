@@ -13,6 +13,7 @@ from typing import Any
 
 from . import (
     cli_common,
+    cli_trace_notes,
     events,
     plans_errors,
     plans_snapshot,
@@ -218,7 +219,9 @@ class _TailFollowLoop:
         stop_event: threading.Event,
         initial_finished: bool,
         include_events: bool = True,
+        show_routine: bool = True,
     ) -> None:
+        self._show_routine = show_routine
         self._state_path = state_path
         # The `follow_events` generator `tail --json` follows: it survives a
         # truncated or rotated events file and holds back a torn last line.
@@ -258,7 +261,9 @@ class _TailFollowLoop:
         for record in new_records:
             if not tail_records._matches_run(record, self._run_id):
                 continue
-            if self._include_events:
+            if self._include_events and (
+                self._show_routine or not tail_event_messages.is_routine(record)
+            ):
                 tail_logs._print_lines(
                     [tail_event_messages._event_line(record)], self._out
                 )
@@ -461,8 +466,13 @@ def tail_plan(
     follow: bool = True,
     out: tail_models.TextSink = sys.stdout,
     poll_interval: float = tail_models.POLL_INTERVAL_SECONDS,
+    show_routine: bool = True,
 ) -> None:
-    """Print recent activity and optionally follow live events/logs."""
+    """Print recent activity and optionally follow live events/logs.
+
+    ``show_routine`` false hides heartbeat and accepted-delivery bookkeeping;
+    the CLI passes that unless ``--all`` is given.
+    """
     if lines <= 0:
         raise tail_models.TailInputError(
             flag_refusal("--lines", POSITIVE_INTEGER, lines)
@@ -495,6 +505,7 @@ def tail_plan(
         targets=targets,
         offsets=offsets,
         final=not follow or initial_finished,
+        show_routine=show_routine,
     )
 
     if not follow:
@@ -511,6 +522,7 @@ def tail_plan(
         poll_interval=poll_interval,
         stop_event=stop_event,
         initial_finished=initial_finished,
+        show_routine=show_routine,
     )
     follow_loop.run()
 
@@ -585,13 +597,33 @@ def tail_from_args(args: argparse.Namespace) -> int:
     ):
         return 1
     try:
-        (tail_plan_json if as_json else tail_plan)(
-            args.plan_dir,
-            state_dir=args.state_dir,
-            lines=args.lines,
-            follow=not args.no_follow,
-        )
+        if as_json:
+            tail_plan_json(
+                args.plan_dir,
+                state_dir=args.state_dir,
+                lines=args.lines,
+                follow=not args.no_follow,
+            )
+        else:
+            tail_plan(
+                args.plan_dir,
+                state_dir=args.state_dir,
+                lines=args.lines,
+                follow=not args.no_follow,
+                show_routine=bool(getattr(args, "all", False)),
+            )
     except (plans_errors.PlanError, tail_models.TailError, OSError) as error:
+        cli_trace_notes.note_reason(
+            "plan-not-found"
+            if isinstance(error, plans_errors.PlanNotFoundError)
+            else "malformed-plan"
+            if isinstance(error, plans_errors.PlanError)
+            else "input-error"
+            if isinstance(error, tail_models.TailInputError)
+            else "tail-error"
+            if isinstance(error, tail_models.TailError)
+            else "os-error"
+        )
         if as_json:
             responses.print_json(
                 responses.error_payload(

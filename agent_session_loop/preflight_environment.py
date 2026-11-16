@@ -59,6 +59,25 @@ def _check_env_repo_root(cwd: Path) -> tuple[PreflightFinding, ...]:
     return ()
 
 
+#: How many dirty paths a finding names before counting the rest.
+_DIRTY_PATH_LIMIT = 5
+
+
+def _dirty_detail(commit_mode: object, porcelain: str) -> str:
+    """Name the paths that make a tree dirty, beside the commit mode.
+
+    "The worktree is dirty" sends the reader to ``git status`` to learn what
+    the finding already knew; the first few paths usually say at once whether
+    it is a stray scratch file or real unfinished work.
+    """
+    paths = [line[3:].strip() for line in porcelain.splitlines() if line[3:].strip()]
+    shown = ", ".join(paths[:_DIRTY_PATH_LIMIT])
+    more = len(paths) - _DIRTY_PATH_LIMIT
+    suffix = f" (+{more} more)" if more > 0 else ""
+    listed = f"; dirty: {shown}{suffix}" if shown else ""
+    return f"commit-mode: {commit_mode}{listed}"
+
+
 def _check_env_git(
     cwd: Path,
     commit_mode: CommitMode | None,
@@ -109,7 +128,7 @@ def _check_env_git(
                     "env-git",
                     "git worktree is dirty; commit-mode runs require a clean tree",
                     path=str(cwd),
-                    detail=f"commit-mode: {commit_mode}",
+                    detail=_dirty_detail(commit_mode, status.stdout),
                 )
             )
 
@@ -164,7 +183,12 @@ def _check_registered_env_git(
                                 f"needed repository {repository.alias} linked tree "
                                 "is dirty or unavailable",
                                 path=str(linked),
-                                detail=f"commit-mode: {commit_mode}",
+                                detail=_dirty_detail(
+                                    commit_mode,
+                                    ""
+                                    if linked_status is None
+                                    else linked_status.stdout,
+                                ),
                             )
                         )
             except repository_evidence.RepositoryEvidenceError as error:
@@ -193,7 +217,7 @@ def _check_registered_env_git(
                         "for the next session; its changes are not committed"
                     ),
                     path=str(repository.root),
-                    detail=f"commit-mode: {commit_mode}",
+                    detail=_dirty_detail(commit_mode, status.stdout),
                 )
             )
         elif status.stdout:
@@ -206,7 +230,7 @@ def _check_registered_env_git(
                         "runs require written registered trees to be clean"
                     ),
                     path=str(repository.root),
-                    detail=f"commit-mode: {commit_mode}",
+                    detail=_dirty_detail(commit_mode, status.stdout),
                 )
             )
     return tuple(findings)

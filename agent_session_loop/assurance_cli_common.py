@@ -10,10 +10,10 @@ from typing import Any
 
 from . import assurance_ledger as ledger
 from . import assurance_projection as projection
-from . import responses, state_plan_refs
+from . import cli_trace_notes, responses, state_plan_refs
 from .assurance_models_primitives import AssuranceError, issue_id_number
 from .cli_defaults import program_name
-from .formatting import count_noun
+from .formatting import count_noun, format_relative_age
 
 """Operator surface over the assurance inbox.
 
@@ -161,6 +161,7 @@ def _print_error(
     **fields: Any,
 ) -> int:
     """Report one failure in whichever form the caller asked for."""
+    cli_trace_notes.note_reason(reason)
     if args.json:
         responses.print_json(
             responses.error_payload(
@@ -401,6 +402,44 @@ def _matching_issues(
     return tuple(matched)
 
 
+def _age(stamp: object, template: str) -> str:
+    """``template`` filled with how long ago ``stamp`` was, or nothing."""
+    if not isinstance(stamp, str) or not stamp:
+        return ""
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return template.format(format_relative_age(moment))
+
+
+def _next_step_lines(rows: list[dict[str, Any]]) -> list[str]:
+    """Where to start, and the commands that take an issue off the list.
+
+    An inbox is only read if it says what to do. Among the open issues shown,
+    the one seen most often is the one most worth a decision, so it is named
+    with the command that opens it and the three that dispose of it.
+    """
+    open_rows = [row for row in rows if row.get("state") == "open"]
+    if not open_rows:
+        return []
+    most_seen = max(open_rows, key=lambda row: row["occurrence_count"])
+    issue_id = most_seen["issue_id"]
+    return [
+        (
+            f"Start with {issue_id} (seen {most_seen['occurrence_count']} "
+            f"time(s)): `asl assurance show {issue_id}`"
+        ),
+        (
+            "Then take it off this list: "
+            f"`asl assurance resolve {issue_id}` (fixed), "
+            f"`asl assurance dismiss {issue_id}` (not a problem), or "
+            f"`asl assurance accept-risk {issue_id}` (known, left as is); "
+            "add `--note TEXT` to say why."
+        ),
+    ]
+
+
 def _list_text_lines(payload: dict[str, Any]) -> list[str]:
     filters = payload["filters"]
     limit = filters["limit"]
@@ -426,10 +465,12 @@ def _list_text_lines(payload: dict[str, Any]) -> list[str]:
             f"  {row['severity']:<8}"
             f"  {row['state']:<13}"
             f"  x{row['occurrence_count']:<4}"
-            f"  last {row['last_seen_at']}"
+            f"  last {row['last_seen_at']}{_age(row['last_seen_at'], ' ({})')}"
+            f"{_age(row.get('first_seen_at'), '  first seen {}')}"
             f"  {row['component']}"
             f"  {_preview(row['summary'])}"
         )
+    lines.extend(_next_step_lines(payload["issues"]))
     if payload["omitted_count"]:
         lines.append(
             f"  ... {count_noun(payload['omitted_count'], 'more matching issue')} "

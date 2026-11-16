@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import (
+    cli_trace_notes,
     plans_errors,
     plans_models,
     plans_snapshot,
@@ -67,12 +68,20 @@ def print_error(
     error: str,
     details: dict[str, Any] | None = None,
     hint: str | None = None,
+    shorthand: str | None = None,
 ) -> None:
     """Print one deterministic error using the common command envelope.
+
+    ``shorthand``, when given, replaces the text form with the multi-line
+    listing of the plans an ambiguous shorthand matched.
 
     ``plan_reference`` is always the unresolved token supplied by the caller;
     successful command payloads reserve ``plan_dir`` for the canonical path.
     """
+    cli_trace_notes.note_reason(reason)
+    if not args.json and shorthand is not None:
+        print(f"{program_name()} {text_label}: {shorthand}", file=sys.stderr)
+        return
     if args.json:
         responses.print_json(
             responses.error_payload(
@@ -151,6 +160,7 @@ def resolve_plan_dir_argument(
                 "candidates": [str(candidate) for candidate in error.candidates],
             },
             hint="pass a full plan directory path to disambiguate",
+            shorthand=state_plan_refs.shorthand_ambiguity_text(error),
         )
         return False
     except state.StateError as error:
@@ -227,6 +237,7 @@ def resolve_plan_context(
                 "candidates": [str(candidate) for candidate in error.candidates],
             },
             hint="pass a full plan directory path to disambiguate",
+            shorthand=state_plan_refs.shorthand_ambiguity_text(error),
         )
         return None
     except (plans_errors.PlanError, state.StateError) as error:

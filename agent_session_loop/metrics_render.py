@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import (
+    formatting,
     metrics_models,
 )
 from . import (
@@ -99,7 +100,13 @@ def _format_counts(counts: dict[str, int]) -> str:
 
 
 def _format_duration_ms(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.0f} ms"
+    if value is None:
+        return "n/a"
+    if value < 10_000:
+        return f"{value:.0f} ms"
+    # A long-running supervise or run is hours, and nine digits of
+    # milliseconds say that badly.
+    return formatting.format_duration_seconds(value / 1000)
 
 
 def _print_cli_invocations_section(section: dict[str, Any]) -> None:
@@ -121,6 +128,7 @@ def _print_cli_invocations_section(section: dict[str, Any]) -> None:
     print(
         f"  successes {section['successes']}, "
         f"nonzero exits {section['nonzero_exits']}, "
+        f"pauses {section.get('pauses', 0)}, "
         f"usage errors {section['usage_errors']}, "
         f"help {section['help_calls']}, "
         f"interrupted {section['interruptions']}, "
@@ -141,6 +149,11 @@ def _print_cli_invocations_section(section: dict[str, Any]) -> None:
     ):
         if counts:
             print(f"  {label}: {_format_counts(counts)}")
+    reasons = section.get("failure_reasons") or []
+    if reasons:
+        print(f"  top failure and pause reasons ({len(reasons)}):")
+        for row in reasons:
+            print(f"    {row['count']} {row['command']}: {row['reason']}")
     failures = section["recent_failures"]
     if not failures:
         return
@@ -152,6 +165,7 @@ def _print_cli_invocations_section(section: dict[str, Any]) -> None:
         print(
             f"    {entry['timestamp']} {entry['command']} "
             f"{entry['outcome']} exit {entry['exit_code']} "
+            f"{f'({reason}) ' if (reason := entry.get('reason')) else ''}"
             f"[{entry['origin']}]"
             f"{f' {exception}' if exception else ''}"
         )
@@ -259,11 +273,18 @@ def _print_report(report: metrics_models.MetricsReport) -> None:
         compaction_section["projected_bytes_reclaimed"]
     )
     print("\nCompaction (dry-run over active dirs):")
-    print(
-        f"  projected reclaim "
-        f"{projected_bytes} "
-        f"across {compaction_section['dirs_projected']} dir(s)"
-    )
+    if compaction_section["projected_bytes_reclaimed"] <= 0:
+        # Compacting a small corpus can cost a few bytes of envelope; a
+        # negative reclaim is "nothing to gain", not a quantity.
+        print(
+            f"  nothing to reclaim across {compaction_section['dirs_projected']} dir(s)"
+        )
+    else:
+        print(
+            f"  projected reclaim "
+            f"{projected_bytes} "
+            f"across {compaction_section['dirs_projected']} dir(s)"
+        )
     if compaction_section["dirs_skipped"]:
         print(f"  skipped: {len(compaction_section['dirs_skipped'])} dir(s)")
     _print_cli_invocations_section(report.cli_invocations)

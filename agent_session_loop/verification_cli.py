@@ -7,7 +7,13 @@ import sys
 from dataclasses import asdict
 from typing import Any
 
-from . import plans_errors, plans_session_ids, plans_snapshot, responses
+from . import (
+    cli_trace_notes,
+    plans_errors,
+    plans_session_ids,
+    plans_snapshot,
+    responses,
+)
 from .cli_defaults import program_name
 from .contracts import CompletionContract, read_completion_contract
 from .plans_session_ids import SessionId
@@ -194,6 +200,7 @@ def _emit_verify_error(
     extra: dict[str, Any] | None = None,
     failure_reason: str | None = None,
 ) -> None:
+    cli_trace_notes.note_reason(reason)
     if want_json:
         fields: dict[str, Any] = {"plan_dir": plan_dir, "session": session}
         if cwd is not None:
@@ -460,4 +467,8 @@ def verify_from_args(args: argparse.Namespace) -> int:
             context=verification_context,
         )
 
+    if not result.passed:
+        # The text form prints the failed checks itself rather than going
+        # through `_emit_verify_error`, so the trace hears the reason here.
+        cli_trace_notes.note_reason(VERIFY_EXIT_REASON_FAILED)
     return 0 if result.passed else 1

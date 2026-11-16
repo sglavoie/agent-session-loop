@@ -10,6 +10,7 @@ from typing import Any
 from . import (
     artifacts,
     cli_common,
+    cli_trace_notes,
     plans_errors,
     plans_files,
     plans_snapshot,
@@ -78,6 +79,7 @@ def unlock_from_args(args: argparse.Namespace) -> int:
         plans_snapshot.require_split_plan_directory(args.plan_dir)
         result = unlock_plan(args.plan_dir, args.state_dir, force=args.force)
     except (plans_errors.PlanError, StateError, OSError) as error:
+        cli_trace_notes.note_reason(_unlock_error_reason(error))
         if args.json:
             details = _unlock_error_details(args)
             responses.print_json(
@@ -163,6 +165,7 @@ def migrate_state_from_args(args: argparse.Namespace) -> int:
         OSError,
         artifacts.ArtifactError,
     ) as error:
+        cli_trace_notes.note_reason(_migrate_state_error_reason(error))
         if getattr(args, "json", False):
             responses.print_json(
                 responses.error_payload(

@@ -322,8 +322,13 @@ def _emit_recent(
     targets: dict[str, dict[str, Any]],
     offsets: dict[str, int],
     final: bool,
+    show_routine: bool = True,
 ) -> None:
     """Print the run's last ``lines`` of activity and seed ``offsets``.
+
+    ``show_routine`` false leaves out the bookkeeping events
+    ``tail_event_messages.is_routine`` names, so the last ``lines`` lines are
+    spent on what the run did.
 
     ``final`` says nothing will follow this replay, so a log's unterminated
     last line is printed now instead of being left for a follow to complete.
@@ -350,7 +355,8 @@ def _emit_recent(
     activity: list[str] = []
     for index, record in enumerate(run_records):
         activity.extend(before.get(index, ()))
-        activity.append(tail_event_messages._event_line(record))
+        if show_routine or not tail_event_messages.is_routine(record):
+            activity.append(tail_event_messages._event_line(record))
         activity.extend(after.get(index, ()))
     activity.extend(trailing)
 

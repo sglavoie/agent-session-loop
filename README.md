@@ -92,6 +92,10 @@ asl doctor PLAN_DIR --harness claude
 asl run PLAN_DIR --harness claude
 ```
 
+Afterwards, `asl` on its own shows what is running, what needs you and what
+just finished, and `asl status` takes a prefix of a plan's id or a word from
+its title in place of the full directory.
+
 `asl harness-compat` classifies the installed `claude` CLI against the tested
 version window without using any model; `asl doctor` needs a plan directory, so
 it runs once one exists, and checks the working directory, the harness

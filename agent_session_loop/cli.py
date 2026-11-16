@@ -42,11 +42,33 @@ from .cli_parser_run import (
 )
 from .cli_parser_support import _AgentSessionLoopArgumentParser
 
+#: The few commands a person types, ahead of the full list: most of what
+#: follows in ``--help`` is plumbing for supervisors, recovery and storage.
+_ROOT_DESCRIPTION = """\
+Run split agent session plans one session at a time.
+
+everyday commands:
+  {prog}                     what is running, what needs you, what just finished
+  {prog} prepare PLAN.md     turn a plan into a loop-ready plan directory
+  {prog} run PLAN_DIR        run it (use the command prepare prints)
+  {prog} status PLAN         where one plan stands
+  {prog} tail PLAN           follow a run as it happens
+  {prog} sessions            running and recent sessions across plans
+  {prog} plans               every known plan
+
+PLAN is a plan directory, the id `{prog} sessions` prints, a prefix of that
+id, or a word from the plan's title. The complete list follows.
+"""
+
+
+_HOME_COMMAND = "home"
+
 
 def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     parser = _AgentSessionLoopArgumentParser(
         prog=prog,
-        description="Run split agent session plans one session at a time.",
+        description=_ROOT_DESCRIPTION.format(prog=prog),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -110,6 +132,10 @@ def _finish(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser(prog=program_name())
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if not raw_argv:
+        # Arriving with nothing to say is a question, not a usage error:
+        # answer it with the home screen.
+        raw_argv = [_HOME_COMMAND]
     try:
         args = parser.parse_args(raw_argv)
     except SystemExit as exit_request:

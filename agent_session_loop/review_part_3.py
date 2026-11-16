@@ -1,5 +1,6 @@
 # mypy: disable-error-code="name-defined,attr-defined,no-redef"
 # ruff: noqa: E402, F403, F405, I001
+from . import cli_trace_notes
 from . import review_shared as _shared
 
 globals().update(
@@ -92,6 +93,9 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
     try:
         payload = review_verdict_payload(plan_dir_arg, args.state_dir)
     except plans_errors.PlanError as error:
+        cli_trace_notes.note_reason(
+            plans_errors.plan_error_reason(error, "malformed-plan")
+        )
         if want_json:
             responses.print_json(
                 responses.error_payload(
@@ -116,6 +120,8 @@ def review_verdict_from_args(args: argparse.Namespace) -> int:
     # A stable missing, malformed, or contradictory verdict is a non-ok
     # payload; exit nonzero so shell automation can trust the status. Valid
     # all-clear and findings verdicts stay ``ok`` and exit zero.
+    if not payload.get("ok"):
+        cli_trace_notes.note_reason(payload.get("reason"))
     return 0 if payload.get("ok") else 1
 
 

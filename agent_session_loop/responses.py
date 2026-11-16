@@ -7,6 +7,8 @@ import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from . import cli_trace_notes
+
 # Exact string ``session-run`` prints once every session is implemented; the
 # status ``next_command`` completion payload reuses it verbatim so the CLI and
 # the skill agree on the wording (see ``skills/session-run/SKILL.md``).
@@ -42,6 +44,7 @@ def error_payload(
         "details": {} if details is None else details,
     }
     payload.update(fields)
+    cli_trace_notes.note_reason(reason, paused=paused)
     return payload
 
 
