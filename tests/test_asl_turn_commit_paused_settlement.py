@@ -21,6 +21,18 @@ from tests.asl_turn_commit_support import PausedRetainedWorkCase
 class PausedRetainedWorkTests(PausedRetainedWorkCase):
     """Settlement of the work a recoverable pause retained."""
 
+    def test_exhausted_repairs_retain_dirty_work_without_a_commit(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, turn = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            pause_details={"verification_repair_exhausted": True},
+        )
+        self.assertIsNone(record)
+        self.assertEqual([], self.launched)
+        self.assertIn("worked.txt", self._dirty(self.repositories["SVC"]))
+        self.assertNotIn(commit_settlement.PAUSED_WORK_COMMIT_KEY, turn)
+
     def test_a_registered_settlement_stages_the_guarded_paths_only(self) -> None:
         self._write(self.repositories["SVC"], "worked.txt")
         record, turn_payload = self._settle(

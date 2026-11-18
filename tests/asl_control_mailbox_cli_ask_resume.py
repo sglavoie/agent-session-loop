@@ -15,6 +15,7 @@ from agent_session_loop import (
     mailbox_cli_ask,
     mailbox_cli_constants,
     mailbox_vocabulary,
+    mailbox_waits,
     run_errors,
 )
 from tests.asl_control_mailbox_cli_support import MailboxCliTestsBase
@@ -25,6 +26,36 @@ from tests.support import (
 
 
 class MailboxCliTestsPart6(MailboxCliTestsBase):
+    def test_resumed_ask_consumes_answer_abandoned_by_a_finished_waiter(self) -> None:
+        question, wait = mailbox_waits.append_wait_question(
+            self.plan_dir,
+            "Need decision",
+            state_dir=self.state_dir,
+        )
+        reply = mailbox_appenders.append_reply(
+            self.plan_dir,
+            question.id,
+            "approved",
+            state_dir=self.state_dir,
+        )
+        mailbox_waits.finish_wait(
+            self.plan_dir,
+            question.id,
+            wait.id,
+            state_dir=self.state_dir,
+            reason=mailbox_vocabulary.WAIT_END_REASON_ERROR,
+            consume_closure=False,
+        )
+        code, result = self.payload_from(
+            mailbox_cli_ask.ask_from_args,
+            self.args(question_id=question.id, wait=True, wait_timeout=0),
+        )
+        self.assertEqual(0, code)
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertIsNotNone(view.receipt_for_closure(reply.id))
+        self.assertIsNone(view.active_wait_for(question.id))
+        self.assertEqual(1, view.counts.questions)
+
     def test_ask_stamps_the_live_run_and_degrades_without_one(self) -> None:
         code, unattributed = self.payload_from(
             mailbox_cli_ask.ask_from_args,

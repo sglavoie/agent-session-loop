@@ -116,7 +116,12 @@ def _observed_repository_writes(
     for turn in turns:
         result = _mapping(turn.get("result"))
         guard = _mapping(result.get("workspace_write_guard"))
+        carried = _sequence(
+            _mapping(guard.get("continuation")).get("carried_repositories")
+        )
         for key, raw_changes in _mapping(guard.get("changed")).items():
+            if key in carried:
+                continue
             changes = _mapping(raw_changes)
             refs = [
                 str(_mapping(entry).get("ref"))
@@ -242,6 +247,8 @@ def _reconcile_observed_commits(
             "refs_changed": list(entry.get("refs_changed") or ()),
         }
         commits.append(commit)
+        if isinstance(alias, str) and isinstance(head_after, str):
+            accounted.add((alias, head_after))
         attempts.append(
             {
                 "name": entry.get("turn"),

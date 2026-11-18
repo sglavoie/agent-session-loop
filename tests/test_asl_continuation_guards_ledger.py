@@ -187,6 +187,29 @@ class InterruptionEarnsNothingTests(unittest.TestCase):
             )
         )
 
+    def test_exhausted_repairs_keep_retained_work_for_inspection(self) -> None:
+        for key in pause_policy.REPAIR_EXHAUSTED_DETAIL_KEYS:
+            for repair in (False, True):
+                with self.subTest(key=key, repair=repair):
+                    self.assertFalse(
+                        commit_settlement._paused_work_commit_is_owed(
+                            self.retained(is_repair_session=repair),
+                            pause_reason="verify-failed",
+                            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+                            pause_details={key: True},
+                        )
+                    )
+
+    def test_recorded_human_required_verdict_prevents_checkpoint(self) -> None:
+        self.assertFalse(
+            commit_settlement._paused_work_commit_is_owed(
+                self.retained(),
+                pause_reason="timeout",
+                commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+                pause_verdict={"recoverable": False, "requires_user": True},
+            )
+        )
+
     def write_events(self, *reasons: str) -> None:
         """A run's pause history, as the repair counters read it back.
 

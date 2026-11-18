@@ -160,6 +160,9 @@ _BULK_EVENT_NAMES = frozenset(
 #: terminal record. They are shed last and only when nothing else is left.
 _ANOMALY_EVENT_NAMES = frozenset(
     {
+        "agent_mux_degraded",
+        "inter_turn_ref_drift",
+        "mailbox_wait_cleanup_failed",
         events.ACTION_REQUIRED_EVENT,
         events.PREFLIGHT_AUTO_REPAIRED_EVENT,
         events.RESOLUTION_CONSUMED_EVENT,
@@ -239,6 +242,7 @@ _STATUS_STATE_KEYS = (
     # there.
     events.ACTION_REQUIRED_SUPERSEDED_KEY,
     "assurance",
+    "agent_mux_degradation",
     "command",
     "completed_session_ids",
     "completed_sessions",

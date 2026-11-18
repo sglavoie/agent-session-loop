@@ -14,6 +14,7 @@ from . import (
     plans_content_hash,
     redirect_continuation,
     redirect_store_models,
+    ref_observations,
     run_commit,
     run_selection,
     state,
@@ -252,6 +253,19 @@ def _prepare_turn_prompt(frame: RunFrame) -> RunResult | LoopSignal | None:
     frame.workspace_snapshot_before = baselines.workspace_snapshot
     frame.legacy_snapshot_before = baselines.legacy_snapshot
     frame.review_fingerprint_before = baselines.review_fingerprint
+    ref_snapshot = dict(baselines.workspace_snapshot or baselines.legacy_snapshot or {})
+    if not ref_snapshot and baselines.review_fingerprint is not None:
+        ref_snapshot = {".": baselines.review_fingerprint}
+    if ref_snapshot:
+        ref_observations.record_boundary(
+            ref_snapshot,
+            payload=frame.ctx.payload,
+            persistence=frame.ctx.persistence,
+            event_path=frame.ctx.event_path,
+            phase="turn-start",
+            session_id=frame.session_id,
+            turn_index=frame.turn_index,
+        )
     frame.external_digests_before = baselines.external_digests
     frame.turn_started_ns = baselines.turn_started_ns
     frame.pending_exception_guard = baselines.pending_exception_guard

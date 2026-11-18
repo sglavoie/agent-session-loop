@@ -86,16 +86,16 @@ class PausedRetainedWorkRecordTests(PausedRetainedWorkCase):
             pause_details={
                 "verification_repair_attempt": 2,
                 "verification_repair_max_attempts": 2,
-                "verification_repair_exhausted": True,
+                "verification_repair_exhausted": False,
             },
         )
 
         assert record is not None
         self.assertEqual(2, record["verification_repair_attempt"])
         self.assertEqual(2, record["verification_repair_max_attempts"])
-        self.assertIs(True, record["verification_repair_exhausted"])
-        # Settling an exhausted repair is deliberate: the work stays
-        # inspectable through `git show` and the flag says the budget is spent.
+        self.assertIs(False, record["verification_repair_exhausted"])
+        # Counters are evidence from the pause, not a second budget verdict.
+        # An exhausted verdict is covered by the no-settlement regression.
         self.assertEqual("committed", record["result"])
 
     def test_details_that_carry_no_numbers_invent_none(self) -> None:

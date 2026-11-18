@@ -290,11 +290,14 @@ shapes. Required and optional fields:
   decision. Targets must be unconditional gates in the same recipe; unknown
   names, self-references, and diagnostic chains are rejected. A recipe must
   contain at least one gate.
-- Every check also accepts optional boolean `review_replay` (default `false`).
-  Only unconditional gates marked `true` are copied into later generated
-  reviews. Use it for durable current-state assertions that should remain true
-  after every repair. Leave HEAD identity, dirty-tree state, intermediate-file
-  presence, and other point-in-time checks unmarked. A diagnostic carrying
+- Every check also accepts optional boolean `review_replay`. Conventional suite
+  commands (for example `just test-ci`, `just ci-paths`, `go test`, and
+  `python3 -m unittest`) default to `true`; other checks default to `false`.
+  Unconditional gates marked `true` are copied into later generated reviews.
+  Use it for durable current-state assertions that should remain true after
+  every repair. Set `false` explicitly to exclude a point-in-time suite;
+  exclusions survive rendering. HEAD identity, dirty-tree state, and
+  intermediate-file presence remain session-local by default. A diagnostic carrying
   `on_failure_of` cannot set `review_replay: true`.
 - `command`: `argv` (non-empty array of strings, no shell), optional
   `timeout_seconds` (defaults to 60, max 3600), optional `cwd`.
@@ -333,6 +336,12 @@ make it conditional on the aggregate gate. This rule is language-neutral:
 ASL compares and executes opaque `argv` arrays rather than interpreting a test
 runner's language or selection syntax. Preflight emits yellow
 `verification-duplicate` findings for exact duplicate `argv`/`cwd` pairs.
+
+Under runner-owned commit modes, `verification-commit-ordering` rejects
+recognizable clean-tree assertions such as `git diff --quiet` or a script
+requiring empty `git status --porcelain` output. Verification runs before the
+runner commits, so replace these with checks of specific protected paths or
+remove them from session gates; a worker must not commit early to satisfy them.
 
 `session-expand` validates each contract against the codebase and records any
 problems in a per-session `## Contract Issues` section in

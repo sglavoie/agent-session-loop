@@ -145,7 +145,7 @@ performed a derived repair.
 The stable finding categories are `plan-structure`, `canonical-session-id`,
 `manifest-readiness`, `missing-contract`, `malformed-contract`,
 `ambiguity-sentinel`, `path-reference`, `verification-scope`,
-`verification-duplicate`, `command-not-runnable`,
+`verification-duplicate`, `verification-commit-ordering`, `command-not-runnable`,
 `progress-journal-missing`, `baseline-missing`, `baseline-stale`,
 `baseline-unexpected`, `baseline-timeout`, `baseline-near-timeout`,
 `workspace-root`, `repository-registry`, `repository-root`,

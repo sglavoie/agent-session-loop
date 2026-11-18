@@ -107,9 +107,15 @@ per turn and per swept check. Its payload carries `phase` (`turn` or
 `verification`), the run/turn/session identity, the `check` name for a
 verification sweep, and the report: `killed`, `kill_failed`, `survivors_after`,
 and an `enumeration` block with `expected_pgid`, `table_size`, `pgid_members`,
-`snapshot_size`, `snapshot_pid_reused`, `snapshot_verified`, `late_descendants`,
+`snapshot_size`, `snapshot_dispositions`, `snapshot_pid_reused`,
+`snapshot_verified`, `late_descendants`,
 `already_gone`, and
-`resampled`. A sweep
+`resampled`. `snapshot_size` counts raw snapshot entries, including repeated
+samples of a PID. `snapshot_dispositions` records each entry's index, PID when
+valid, and outcome (`verified`, `already-gone`, `pid-reused`, or `invalid`),
+with reasons for mismatches and malformed entries. PID lists and signal
+outcomes are deduplicated; raw disposition counts equal `snapshot_size`.
+A sweep
 that found nothing is the normal case and is not recorded, so a `process_sweep`
 event always means real cleanup happened. The auto-commit backstop's sweep is
 the exception to the event: it is not a turn or a check, so its report is

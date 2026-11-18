@@ -318,6 +318,8 @@ def _paused_work_commit_is_owed(
     *,
     pause_reason: str,
     commit_mode: str | None,
+    pause_details: Mapping[str, Any] | None = None,
+    pause_verdict: Mapping[str, Any] | None = None,
 ) -> bool:
     """Whether this pause owes the work its turn retained a commit.
 
@@ -330,7 +332,13 @@ def _paused_work_commit_is_owed(
     """
     if retained.is_review_session:
         return False
-    if pause_reason not in pause_policy.RECOVERABLE_PAUSE_REASONS:
+    verdict = pause_policy.classify_pause(pause_reason, pause_details)
+    if not verdict["recoverable"] or verdict["requires_user"]:
+        return False
+    if pause_verdict and (
+        pause_verdict.get("recoverable") is False
+        or pause_verdict.get("requires_user") is True
+    ):
         return False
     return commit_mode is not None or retained.is_repair_session
 
@@ -391,7 +399,11 @@ def _settle_paused_retained_work(
     record that disagreed with the history.
     """
     if not _paused_work_commit_is_owed(
-        retained, pause_reason=pause_reason, commit_mode=commit_mode
+        retained,
+        pause_reason=pause_reason,
+        commit_mode=commit_mode,
+        pause_details=pause_details,
+        pause_verdict=payload.get("pause_policy"),
     ):
         return None
     persistence = run_persistence._run_persistence(persistence)

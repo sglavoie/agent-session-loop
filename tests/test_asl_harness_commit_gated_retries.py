@@ -480,8 +480,7 @@ class GatedCommitRetryTests(FakeHarnessIntegrationBase):
             verification_transitions.MAX_VERIFICATION_REPAIR_ATTEMPTS,
             second_details["verification_repair_max_attempts"],
         )
-        self.assertTrue(
-            second_payload[commit_settlement.PAUSED_WORK_COMMIT_KEY][
-                "verification_repair_exhausted"
-            ]
-        )
+        # Exhaustion requires human inspection, so this turn must not open
+        # another retention commit even though its reason is verify-failed.
+        self.assertNotIn(commit_settlement.PAUSED_WORK_COMMIT_KEY, second_payload)
+        self.assertEqual([], second_payload["commits"])

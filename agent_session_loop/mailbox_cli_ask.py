@@ -326,7 +326,11 @@ def ask_from_args(args: argparse.Namespace) -> int:
 
             if args.wait:
                 wait_start = initial_view.active_wait_for(question.id)
-                if wait_start is None and initial_view.closure_for(question.id) is None:
+                existing_closure = initial_view.closure_for(question.id)
+                if wait_start is None and (
+                    existing_closure is None
+                    or initial_view.receipt_for_closure(existing_closure.id) is None
+                ):
                     wait_start = mailbox_waits.append_wait_start(
                         context.snapshot.plan_dir,
                         question.id,

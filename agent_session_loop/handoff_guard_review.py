@@ -11,6 +11,7 @@ from . import (
     plans_models,
     plans_payloads,
     plans_snapshot,
+    ref_observations,
     repository_evidence,
     review,
     review_guard,
@@ -66,6 +67,15 @@ def _enforce_review_mutation_guard(
         before.plan_dir,
         exclude=exclude,
         include_ignored=include_ignored,
+    )
+    ref_observations.record_boundary(
+        {".": fingerprint_after},
+        payload=payload,
+        persistence=persistence,
+        event_path=event_path,
+        phase="turn-end",
+        session_id=session_id,
+        turn_index=int(turn_payload.get("turn_index") or 0),
     )
     excluded = list(exclude)
     unavailable = review_guard._review_guard_unavailable_detail(fingerprint_after)

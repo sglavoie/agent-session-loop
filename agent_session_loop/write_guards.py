@@ -88,6 +88,7 @@ from . import (
     plans_payloads,
     plans_session_scope,
     plans_snapshot,
+    ref_observations,
     repository_evidence,
     run_inputs,
     run_persistence,
@@ -149,6 +150,15 @@ def _enforce_workspace_write_guard(
             },
         }
     else:
+        ref_observations.record_boundary(
+            snapshot_after,
+            payload=payload,
+            persistence=persistence,
+            event_path=event_path,
+            phase="turn-end",
+            session_id=session_id,
+            turn_index=int(turn_payload.get("turn_index") or 0),
+        )
         comparison = repository_evidence.compare_workspace_snapshots(
             snapshot_before, snapshot_after
         )

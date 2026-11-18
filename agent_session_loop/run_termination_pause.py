@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from . import external_write_evidence, workspace_evidence_bases
+
 # ruff: noqa: F403, F405
 from .run_termination_shared import *
 
@@ -208,6 +210,38 @@ def _pause_remediation(
             current = current.get(key) if isinstance(current, Mapping) else None
         if isinstance(current, list) and current:
             return [dict(entry) for entry in current if isinstance(entry, Mapping)]
+    guard = details.get("workspace_write_guard")
+    unavailable = guard.get("unavailable") if isinstance(guard, Mapping) else None
+    if isinstance(unavailable, Mapping):
+        paths = []
+        for key, row in unavailable.items():
+            node, row_reason = workspace_evidence_bases._unavailable_path_and_reason(
+                row
+            )
+            if row_reason in (
+                external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON,
+                external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_UNWRITTEN_REASON,
+            ):
+                paths.append(str(node or key))
+        if paths:
+            return [
+                {
+                    "check_id": "runtime.external-write-authority",
+                    "category": reason,
+                    "fix_category": "invocation-fix",
+                    "paths": paths,
+                    "message": (
+                        "Inspect the external paths with unresolved write authority: "
+                        + ", ".join(paths)
+                        + ". If these data writes are intended, explicitly relaunch "
+                        "with --external-write-root /absolute/directory for each "
+                        "narrow existing directory (use the parent for a file). "
+                        "This authorizes future data writes only; inspect retained "
+                        "work and the prior incident before resuming. Repository "
+                        "paths require declared repository scope instead."
+                    ),
+                }
+            ]
     resolution = details.get("mailbox_resolution")
     if (
         isinstance(resolution, Mapping)

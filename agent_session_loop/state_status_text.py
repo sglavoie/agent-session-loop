@@ -200,6 +200,9 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         print(f"Run state: unreadable ({runner_state['error']})")
     elif runner_state.get("present"):
         run_id = runner_state.get("run_id") or "unknown"
+        degradation = runner_state.get("agent_mux_degradation")
+        if isinstance(degradation, dict):
+            print(f"AgentMux notifications: degraded ({degradation.get('reason')})")
         run_started_at = _when(runner_state.get("run_started_at"))
         print(f"Run state: run {run_id} started {run_started_at}")
         outcome = _run_outcome_line(runner_state)

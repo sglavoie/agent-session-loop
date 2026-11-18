@@ -29,6 +29,44 @@ from tests.support import (
 class AgentMuxNotificationIntegrationTestsPart2(
     AgentMuxNotificationIntegrationTestsBase
 ):
+    def test_ended_runtime_disables_delivery_for_this_run_and_surfaces_degradation(
+        self,
+    ) -> None:
+        failure = subprocess.CompletedProcess(
+            ["/opt/amx"],
+            2,
+            stdout=json.dumps(
+                {
+                    "status": "permanent_failure",
+                    "retryable": False,
+                    "reason": "runtime_session_ended",
+                }
+            ),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.finish_payload(Path(tmp))
+            payload["events_path"] = str(Path(tmp) / "events.jsonl")
+            persistence = run_persistence._RunPersistence()
+            with (
+                mock.patch.object(
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
+                mock.patch.object(
+                    agent_mux_delivery.subprocess, "run", return_value=failure
+                ) as run,
+            ):
+                for _ in range(3):
+                    run_persistence._notify_agent_mux_loop_started(payload, persistence)
+                self.assertEqual(1, run.call_count)
+                self.assertEqual(1, payload["agent_mux_sequence"])
+                payload["run_id"] = "new-run"
+                run_persistence._notify_agent_mux_loop_started(payload, persistence)
+                self.assertEqual(2, run.call_count)
+            self.assertEqual("new-run", payload["agent_mux_degradation"]["run_id"])
+            records = read_jsonl(Path(payload["events_path"]))
+            self.assertEqual(2, sum(r["name"] == "agent_mux_degraded" for r in records))
+
     def test_lifecycle_notifications_carry_phase_sequence_and_identity(
         self,
     ) -> None:

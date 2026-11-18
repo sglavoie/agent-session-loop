@@ -156,6 +156,34 @@ class SweepSurvivorsTests(unittest.TestCase):
         self.assertEqual([], enumeration["pgid_members"])
         self.assertEqual(3, enumeration["snapshot_size"])
         self.assertEqual([4243], enumeration["snapshot_verified"])
+        self.assertEqual([4244], enumeration["snapshot_pid_reused"])
+        self.assertEqual([4245], enumeration["already_gone"])
+        self.assertEqual(
+            ["verified", "pid-reused", "already-gone"],
+            [row["outcome"] for row in enumeration["snapshot_dispositions"]],
+        )
+
+    def test_union_snapshot_accounts_for_duplicates_and_malformed_entries(self) -> None:
+        stdout = "  4243     1 4243 leftover escapee\n"
+        report = self._sweep(
+            root_pid=4242,
+            expected_pgid=None,
+            prior_snapshot=[
+                {"pid": 4243, "command": "leftover escapee"},
+                {"pid": 4243, "command": "leftover escapee"},
+                {"pid": "invalid", "command": "unknown"},
+                {"pid": 4243},
+            ],
+            kill=mock.Mock(),
+            run_command=mock.Mock(return_value=fixtures._ps_result(stdout)),
+        )
+        self.assertEqual([4243], report["killed"])
+        enumeration = report["enumeration"]
+        self.assertEqual(4, enumeration["snapshot_size"])
+        self.assertEqual(
+            ["verified", "verified", "invalid", "invalid"],
+            [row["outcome"] for row in enumeration["snapshot_dispositions"]],
+        )
 
     def test_snapshot_rejects_reused_pid_with_same_command(self) -> None:
         # Two identical commands: 4243 is a pid the escapee lost and something

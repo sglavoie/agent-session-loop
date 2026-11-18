@@ -193,18 +193,68 @@ def _aborted_turns(context: _CheckContext) -> set[tuple[Any, Any]]:
     }
 
 
+def _redirected_turns(context: _CheckContext) -> set[tuple[str, int]]:
+    """Exact turns with durable redirect acceptance and matching forced cleanup."""
+    accounted: set[tuple[str, int]] = set()
+    for turn in context.turns:
+        result = audit_evidence_helpers._mapping(turn.get("result"))
+        redirect = audit_evidence_helpers._mapping(result.get("redirect"))
+        control = audit_evidence_helpers._mapping(redirect.get("control"))
+        termination = audit_evidence_helpers._mapping(control.get("termination"))
+        target = audit_evidence_helpers._mapping(redirect.get("target"))
+        index = result.get("turn_index")
+        session = str(result.get("session_id", result.get("session")))
+        operation = control.get("operation_id")
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < 1
+            or not isinstance(operation, str)
+            or not operation
+            or control.get("acceptance_durable") is not True
+            or termination.get("forced") is not True
+            or termination.get("complete") is not True
+            or termination.get("reason") != "redirect"
+            or termination.get("operation_id") != operation
+            or target.get("run_id") != context.payload.get("run_id")
+            or str(target.get("session_id")) != session
+            or target.get("turn_index") != index
+        ):
+            continue
+        if any(
+            audit_evidence_helpers._mapping(accepted).get("operation_id") == operation
+            and audit_evidence_helpers._mapping(accepted).get("target") == target
+            for accepted in audit_evidence_helpers._sequence(redirect.get("accepted"))
+        ):
+            accounted.add((session, index))
+    return accounted
+
+
 def _check_operator_abort(context: _CheckContext) -> _Verdict:
     evidence = context.evidence(
         context.event_summary.get("reference"),
         context.section("state").get("reference"),
     )
     honored = _abort_turn_records(context, events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED)
+    redirected = _redirected_turns(context)
     aborted_exits = [
         audit_evidence_helpers._mapping(record.get("payload"))
         for record in context.records
         if record.get("name") == events.TURN_EXECUTION_FINISHED_EVENT
         and audit_evidence_helpers._mapping(record.get("payload")).get("aborted")
         is True
+        and (
+            str(
+                audit_evidence_helpers._mapping(record.get("payload")).get(
+                    "session_id",
+                    audit_evidence_helpers._mapping(record.get("payload")).get(
+                        "session"
+                    ),
+                )
+            ),
+            audit_evidence_helpers._mapping(record.get("payload")).get("turn_index"),
+        )
+        not in redirected
     ]
     if not honored and not aborted_exits:
         return _Verdict(

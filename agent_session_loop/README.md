@@ -1,5 +1,34 @@
 # Agent Session Loop (ASL)
 
+Assurance backlog fixes preserve the distinction between retained work and
+accepted completion. Paused-work commits consult the full pause policy,
+including exhausted verification and review repair budgets. Human-required
+pauses leave the retained work uncommitted. Preflight rejects recognizable
+clean-tree assertions under runner-owned commit modes because authoritative
+verification precedes those commits.
+
+Conventional test, lint, check, build and CI commands default to generated-review
+replay. An explicit `review_replay: false` preserves a point-in-time exclusion
+through contract rendering; other custom gates still opt in explicitly.
+Diagnostics remain session-local. Audit commit projections omit carried
+continuation evidence and deduplicate derived repository/head pairs. The abort
+audit recognizes forced redirects only when the exact turn has durable
+acceptance and matching operation and termination evidence.
+
+Process sweeps retain a disposition for every raw snapshot entry, including
+duplicates, missing PIDs, command/birth mismatches and malformed rows; the PID
+and signal lists remain unique. Remote-ref snapshots at turn boundaries record
+inter-turn drift with an unknown writer, covering the verification and commit
+gap without assigning those changes to the next worker.
+
+Worker exit ends its remaining mailbox waits without receipting answers it
+never consumed. Error wait-ends may retain an existing unconsumed closure;
+timeout-versus-reply arbitration is unchanged. External-write pauses include
+the affected paths and explain explicit `--external-write-root` authorization,
+including unclassified paths with no detected write. A permanent AgentMux
+`runtime_session_ended` failure records one degradation event and status field,
+then suppresses further lifecycle delivery attempts for that run.
+
 Turn results measure `total_duration_seconds` through acceptance or paused
 settlement, including verification and retained-work commits. The original
 harness-exit total remains in `execution_total_duration_seconds`. Rejected

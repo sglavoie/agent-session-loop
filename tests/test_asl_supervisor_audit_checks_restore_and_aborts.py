@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -412,6 +413,68 @@ class DeterministicCheckTests(checks_support.DeterministicCheckFixture):
                 "lifecycle.operator-abort",
                 [item.invariant_key for item in findings],
             )
+
+    def test_durable_redirect_explains_only_its_exact_aborted_exit(self) -> None:
+        target = {"run_id": RUN_ID, "session_id": "9", "turn_index": 1}
+        redirect = {
+            "target": target,
+            "accepted": [{"operation_id": "redirect-1", "target": target}],
+            "control": {
+                "operation_id": "redirect-1",
+                "acceptance_durable": True,
+                "termination": {
+                    "operation_id": "redirect-1",
+                    "reason": "redirect",
+                    "forced": True,
+                    "complete": True,
+                },
+            },
+        }
+        bundle = {
+            "run_id": RUN_ID,
+            "turns": [
+                {"result": {"session_id": "9", "turn_index": 1, "redirect": redirect}}
+            ],
+            "events": {
+                "records": [
+                    {
+                        "name": events.TURN_EXECUTION_FINISHED_EVENT,
+                        "payload": {
+                            "session_id": "9",
+                            "turn_index": 1,
+                            "aborted": True,
+                            "returncode": -9,
+                        },
+                    }
+                ]
+            },
+        }
+        for defect in (
+            None,
+            "other-turn",
+            "other-operation",
+            "not-durable",
+            "not-stopped",
+        ):
+            damaged = copy.deepcopy(bundle)
+            control = damaged["turns"][0]["result"]["redirect"]["control"]
+            if defect == "other-turn":
+                damaged["events"]["records"][0]["payload"]["turn_index"] = 2
+            elif defect == "other-operation":
+                control["termination"]["operation_id"] = "other"
+            elif defect == "not-durable":
+                control["acceptance_durable"] = False
+            elif defect == "not-stopped":
+                control["termination"]["complete"] = False
+            with self.subTest(defect=defect):
+                results = {
+                    r.check: r
+                    for r in supervisor_audit_checks.run_deterministic_checks(damaged)
+                }
+                self.assertEqual(
+                    "pass" if defect is None else "fail",
+                    results["operator-abort"].status,
+                )
 
     def test_a_request_naming_another_turn_does_not_cover_this_kill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

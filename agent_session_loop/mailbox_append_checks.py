@@ -150,7 +150,11 @@ def _check_append_preconditions(
             raise MailboxError(
                 REJECT_QUESTION_NOT_FOUND, question_id, path=mailbox_path
             )
-        if current_view.closure_for(question_id) is not None:
+        closure = current_view.closure_for(question_id)
+        if (
+            closure is not None
+            and current_view.receipt_for_closure(closure.id) is not None
+        ):
             raise MailboxError(REJECT_QUESTION_NOT_OPEN, question_id, path=mailbox_path)
         if current_view.active_wait_for(question_id) is not None:
             raise MailboxError(

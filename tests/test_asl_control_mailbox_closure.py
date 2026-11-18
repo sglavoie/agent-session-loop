@@ -24,6 +24,48 @@ from tests.asl_control_mailbox_support import MailboxTestsBase
 
 
 class MailboxTestsPart2(MailboxTestsBase):
+    def test_finished_turn_closes_only_its_own_waits_without_receipting_answers(
+        self,
+    ) -> None:
+        questions = [
+            mailbox_waits.append_wait_question(
+                self.plan_dir,
+                "Need a decision",
+                state_dir=self.state_dir,
+                run_id=run,
+                session_id="5",
+                turn_index=turn,
+            )
+            for run, turn in (("run-A", 1), ("run-A", 2), ("run-B", 1))
+        ]
+        question, wait = questions[0]
+        closure = mailbox_appenders.append_reply(
+            self.plan_dir, question.id, "answer", state_dir=self.state_dir
+        )
+        ended = mailbox_waits.end_turn_waits(
+            self.plan_dir,
+            run_id="run-A",
+            session_id="5",
+            turn_index=1,
+            state_dir=self.state_dir,
+        )
+        self.assertEqual([wait.id], ended)
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertIsNone(view.active_wait_for(question.id))
+        self.assertIsNone(view.receipt_for_closure(closure.id))
+        for other, active in questions[1:]:
+            self.assertEqual(active.id, view.active_wait_for(other.id).id)
+        self.assertEqual(
+            [],
+            mailbox_waits.end_turn_waits(
+                self.plan_dir,
+                run_id="run-A",
+                session_id="5",
+                turn_index=1,
+                state_dir=self.state_dir,
+            ),
+        )
+
     def test_delivery_projections_report_latest_successful_and_deliverable(
         self,
     ) -> None:

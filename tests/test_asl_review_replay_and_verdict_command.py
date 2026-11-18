@@ -91,6 +91,45 @@ class GeneratedReviewReplayTests(unittest.TestCase):
         self.assertNotIn("historical-head", serialized)
         self.assertNotIn("session-local-clean-tree", serialized)
 
+    def test_unmarked_suite_replays_but_explicit_exclusion_survives_rendering(
+        self,
+    ) -> None:
+        checks = [
+            {"type": "command", "name": "test-ci", "argv": ["just", "testCI"]},
+            {
+                "type": "command",
+                "name": "ci-paths",
+                "argv": ["go", "test", "./scripts"],
+            },
+            {
+                "type": "command",
+                "name": "historical-suite",
+                "argv": ["just", "test-history"],
+                "review_replay": False,
+            },
+        ]
+        write_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    ",".join(json.dumps(check) for check in checks), session="1"
+                ),
+            },
+        )
+        contract = contracts.read_completion_contract(self.plan_dir, "1")
+        self.assertEqual(
+            [True, True, False], [c.review_replay for c in contract.verify.checks]
+        )
+        excluded = contracts.check_payload(contract.verify.checks[2])
+        self.assertIs(excluded["review_replay"], False)
+        replay = review_session_contract._broad_review_verification_checks(
+            self.plan_dir
+        )
+        self.assertEqual(
+            ["broad:1:test-ci", "broad:1:ci-paths"], [c["name"] for c in replay]
+        )
+
     def test_pending_generated_review_refresh_preserves_lifetime_sections(
         self,
     ) -> None:

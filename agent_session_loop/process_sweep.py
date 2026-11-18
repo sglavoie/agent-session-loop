@@ -89,26 +89,44 @@ def sweep_survivors(
 
         snapshot_verified: list[int] = []
         pid_reused: list[int] = []
+        snapshot_gone: list[int] = []
+        dispositions: list[dict[str, Any]] = []
         snapshot_size = 0
         for entry in prior_snapshot or ():
             snapshot_size += 1
+            disposition: dict[str, Any] = {"index": snapshot_size - 1}
+            dispositions.append(disposition)
             try:
                 pid = int(entry["pid"])
             except KeyError, TypeError, ValueError:
+                disposition.update(outcome="invalid", reason="invalid-pid")
                 continue
+            disposition["pid"] = pid
             current = table.get(pid)
             recorded_command = entry.get("command")
-            if current is None or recorded_command is None:
+            if not isinstance(recorded_command, str) or not recorded_command:
+                disposition.update(outcome="invalid", reason="missing-command")
+                continue
+            if current is None:
+                snapshot_gone.append(pid)
+                disposition["outcome"] = "already-gone"
                 continue
             if current["command"] != recorded_command:
+                pid_reused.append(pid)
+                disposition.update(outcome="pid-reused", reason="command-mismatch")
                 continue
             recorded_birth = entry.get("birth")
             current_birth = current.get("birth")
             if recorded_birth and current_birth and recorded_birth != current_birth:
                 pid_reused.append(pid)
+                disposition.update(outcome="pid-reused", reason="birth-mismatch")
                 continue
             snapshot_verified.append(pid)
+            disposition["outcome"] = "verified"
         enumeration["snapshot_size"] = snapshot_size
+        # Size and dispositions count raw entries, including repeated samples;
+        # PID lists and signal outcomes count each process only once.
+        enumeration["snapshot_dispositions"] = dispositions
         enumeration["snapshot_pid_reused"] = sorted(set(pid_reused))
         # Callers may union several snapshots of the same tree, so a pid can be
         # verified more than once; the report counts each pid once.
@@ -130,7 +148,7 @@ def sweep_survivors(
 
         killed: list[int] = []
         kill_failed: list[dict[str, Any]] = []
-        already_gone: list[int] = []
+        already_gone: list[int] = list(snapshot_gone)
         for pid in candidates:
             try:
                 kill(pid, signal.SIGKILL)
@@ -140,7 +158,7 @@ def sweep_survivors(
                 kill_failed.append({"pid": pid, "error": str(exc)})
             else:
                 killed.append(pid)
-        enumeration["already_gone"] = already_gone
+        enumeration["already_gone"] = sorted(set(already_gone))
 
         survivors_after: list[int] = []
         enumeration["resampled"] = False

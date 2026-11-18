@@ -310,7 +310,10 @@ def _workspace_unavailable_message(
     repository = False
     for raw in unavailable.values():
         _node, reason = _unavailable_path_and_reason(raw)
-        if reason == external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON:
+        if reason in (
+            external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON,
+            external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_UNWRITTEN_REASON,
+        ):
             external = True
         else:
             repository = True

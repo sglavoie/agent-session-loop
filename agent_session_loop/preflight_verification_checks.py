@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import contracts, plans_models, plans_registry, plans_session_scope
 from .contracts import (
     CommandCheck,
     CompletionContract,
@@ -13,7 +14,72 @@ from .contracts import (
 from .plans_errors import PlanError
 from .preflight_models import PreflightFinding, PreflightSeverity, _finding
 from .verification_command_diagnosis import diagnose_command, diagnose_command_scope
+from .verification_command_semantics import clean_tree_gate
 from .verification_models import VerificationContext
+
+
+def check_commit_verification_ordering(
+    snapshot: plans_models.PlanSnapshot | None,
+    *,
+    commit_mode: str | None,
+) -> tuple[PreflightFinding, ...]:
+    """Refuse cleanliness assertions that force workers to commit before gates."""
+    if snapshot is None or commit_mode is None:
+        return ()
+    findings: list[PreflightFinding] = []
+    # Review recognition depends on the review lifecycle, which in turn uses
+    # preflight while rendering repair contracts. Defer that import until use.
+    from .review_session_contract import is_generated_review_session_file
+
+    try:
+        registry = plans_registry.read_repository_registry(snapshot.plan_dir)
+    except PlanError:
+        return ()
+    for session in snapshot.sessions:
+        if session.status == "complete":
+            continue
+        path = Path(session.path)
+        if is_generated_review_session_file(path):
+            continue
+        try:
+            contract = contracts.read_completion_contract(snapshot.plan_dir, session.id)
+            scope = (
+                plans_session_scope.parse_session_scope(
+                    path.read_text(encoding="utf-8"), registry.aliases
+                )
+                if registry is not None
+                else None
+            )
+        except PlanError, OSError, UnicodeError:
+            continue
+        if contract is None:
+            continue
+        for check in contract.verify.checks:
+            if scope is not None and check.repo not in scope.writes:
+                continue
+            if (
+                isinstance(check, CommandCheck)
+                and not check.on_failure_of
+                and clean_tree_gate(check.argv)
+            ):
+                findings.append(
+                    _finding(
+                        "red",
+                        "verification-commit-ordering",
+                        f"session {session.id} check {check.name!r} requires "
+                        "a clean tree before runner-owned commits",
+                        session_id=session.id,
+                        path=str(path),
+                        detail=(
+                            "Authoritative verification runs before the runner "
+                            "commits retained work. Remove the clean-tree "
+                            "assertion from this session's gates or replace it "
+                            "with a check of specific protected paths. Do not "
+                            "ask the worker to commit early."
+                        ),
+                    )
+                )
+    return tuple(findings)
 
 
 def _check_verification_scope(

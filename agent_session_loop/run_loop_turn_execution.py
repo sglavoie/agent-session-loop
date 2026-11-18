@@ -7,6 +7,8 @@ import functools
 from . import (
     conversation_resume,
     events,
+    mailbox_models,
+    mailbox_waits,
     plans_handoff,
     plans_payloads,
     redirect_continuation,
@@ -77,6 +79,26 @@ def _execute_turn(frame: RunFrame) -> RunResult | LoopSignal | None:
     )
     frame.result = execution.result
     frame.live_turn_payload = execution.live_turn
+    if frame.mailbox_enabled:
+        try:
+            mailbox_waits.end_turn_waits(
+                frame.before.plan_dir,
+                run_id=frame.ctx.run_id,
+                session_id=frame.session_id,
+                turn_index=frame.turn_index,
+                state_dir=frame.args.state_dir,
+            )
+        except (OSError, mailbox_models.MailboxError) as error:
+            frame.ctx.persistence.append_event(
+                frame.ctx.event_path,
+                "mailbox_wait_cleanup_failed",
+                {
+                    "run_id": frame.ctx.run_id,
+                    "session_id": frame.session_id,
+                    "turn_index": frame.turn_index,
+                    "error": str(error),
+                },
+            )
     # Immediately on the way out of the turn, ahead of every guard that
     # can end the run: a turn that can show it never submitted its
     # prompt is holding words that belong back in the journal, and the

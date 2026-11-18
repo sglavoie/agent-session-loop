@@ -165,6 +165,18 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         ),
         fix_category="plan-edit",
     ),
+    "verification-commit-ordering": RepairHint(
+        category="verification-commit-ordering",
+        check_id="verification-commit-ordering.fix",
+        severity_hint="red",
+        message=(
+            "Remove the clean-tree assertion from the session's authoritative "
+            "gates, or check specific protected paths. Runner-owned commits "
+            "happen after verification; the worker must not commit early to pass."
+        ),
+        question_template="Repair session {session_id}'s clean-tree gate ({detail})?",
+        fix_category="session-recipe-edit",
+    ),
     "verification-duplicate": RepairHint(
         category="verification-duplicate",
         check_id="verification-duplicate.remove",

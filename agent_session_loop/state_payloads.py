@@ -291,6 +291,7 @@ def _runner_state_payload(
         "review_harness": run_config.get("review_harness"),
         "supervisor_audit": run_config.get("supervisor_audit"),
         "assurance": assurance,
+        "agent_mux_degradation": raw.get("agent_mux_degradation"),
         # A legacy single-repository run records only the directory it ran
         # in; that directory is still what names its project.
         "cwd": raw.get("cwd"),

@@ -356,6 +356,19 @@ def notify_loop(
         return sequence
 
     def record_outcome(outcome: dict[str, Any]) -> None:
+        degraded = (
+            outcome.get("final_status") == STATUS_PERMANENT_FAILURE
+            and outcome.get("reason") == "runtime_session_ended"
+        )
+        if degraded:
+            payload["agent_mux_degradation"] = {
+                "run_id": payload.get("run_id"),
+                "reason": "runtime_session_ended",
+                "detected_at": clock.isoformat(clock.utc_now()),
+                "source_event_id": outcome.get("source_event_id"),
+            }
+            if persistence is not None:
+                persistence.write_state(payload)
         raw_event_path = payload.get("events_path") or payload.get("event_path")
         if not isinstance(raw_event_path, str | Path) or not str(raw_event_path):
             return
@@ -369,6 +382,24 @@ def notify_loop(
                 event_path,
                 events.Event(name=events.AGENT_MUX_DELIVERY_EVENT, payload=outcome),
             )
+        if degraded:
+            detail = payload["agent_mux_degradation"]
+            if persistence is not None:
+                persistence.append_event(event_path, "agent_mux_degraded", detail)
+            else:
+                events.append_event(
+                    event_path, events.Event(name="agent_mux_degraded", payload=detail)
+                )
+
+    def delivery_cancelled() -> bool:
+        # notify evaluates this under EMIT_LOCK, so a concurrent heartbeat
+        # sees the first permanent failure before allocating or dispatching.
+        degradation = payload.get("agent_mux_degradation")
+        return (
+            isinstance(degradation, Mapping)
+            and degradation.get("run_id") == payload.get("run_id")
+            and degradation.get("reason") == "runtime_session_ended"
+        ) or (cancelled is not None and cancelled())
 
     notify(
         event_name,
@@ -384,5 +415,5 @@ def notify_loop(
         run_command=subprocess.run,
         sleep=retry_sleep,
         emitted_at=clock.utc_now,
-        cancelled=cancelled,
+        cancelled=delivery_cancelled,
     )

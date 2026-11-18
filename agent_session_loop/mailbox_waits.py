@@ -21,8 +21,6 @@ from .mailbox_constants import (
     REJECT_INVALID_TARGET,
     REJECT_INVALID_WAIT_END_REASON,
     REJECT_INVALID_WAIT_ID,
-    REJECT_QUESTION_ALREADY_ANSWERED,
-    REJECT_QUESTION_ALREADY_RESOLVED,
     REJECT_QUESTION_NOT_FOUND,
     REJECT_QUESTION_NOT_WAITING,
 )
@@ -35,7 +33,6 @@ from .mailbox_vocabulary import (
     DELIVERY_MODE_WAIT,
     KIND_QUESTION,
     KIND_RECEIPT,
-    KIND_REPLY,
     KIND_WAIT_END,
     KIND_WAIT_START,
     WAIT_END_REASON_CLOSURE,
@@ -161,10 +158,8 @@ def finish_wait(
     closure wait-end.  Otherwise it records the requested timeout/error end;
     any later strict wait-mode closure is rejected as ``question-not-waiting``.
 
-    ``consume_closure=False`` is for a waiter that is going away without being
-    able to act on an answer: a closure found under the lock is then refused
-    rather than receipted, so the answer is never reported consumed by a run
-    that did not deliver it.
+    ``consume_closure=False`` ends a departing wait without receipting an
+    answer. An existing closure remains in the mailbox, unconsumed.
     """
     if reason not in (WAIT_END_REASON_TIMEOUT, WAIT_END_REASON_ERROR):
         raise MailboxError(REJECT_INVALID_WAIT_END_REASON, str(reason))
@@ -205,14 +200,10 @@ def finish_wait(
                 REJECT_QUESTION_NOT_WAITING, question_id, path=mailbox_path
             )
         closure = view.closure_for(question_id)
-        if closure is not None and not consume_closure:
-            raise MailboxError(
-                REJECT_QUESTION_ALREADY_ANSWERED
-                if closure.kind == KIND_REPLY
-                else REJECT_QUESTION_ALREADY_RESOLVED,
-                question_id,
-                path=mailbox_path,
-            )
+        if not consume_closure:
+            if closure is not None:
+                reason = WAIT_END_REASON_ERROR
+            closure = None
         records: list[dict[str, Any]] = []
         receipt: MailboxMessage | None = None
         if closure is not None:
@@ -279,6 +270,45 @@ def finish_wait(
         closure=closure,
         receipt=receipt,
     )
+
+
+def end_turn_waits(
+    plan_dir: str | Path,
+    *,
+    run_id: str,
+    session_id: str,
+    turn_index: int,
+    state_dir: str | Path | None = None,
+) -> list[str]:
+    """Close waits owned by a finished worker, without consuming its answers."""
+    view = read_mailbox(plan_dir, state_dir=state_dir)
+    ended: list[str] = []
+    for question in view.messages:
+        if (
+            question.kind != KIND_QUESTION
+            or question.run_id != run_id
+            or str(question.session_id) != session_id
+            or question.turn_index != turn_index
+        ):
+            continue
+        wait = view.active_wait_for(question.id)
+        if wait is None:
+            continue
+        try:
+            finish_wait(
+                plan_dir,
+                question.id,
+                wait.id,
+                state_dir=state_dir,
+                reason=WAIT_END_REASON_ERROR,
+                consume_closure=False,
+            )
+        except MailboxError as error:
+            if error.reason != REJECT_QUESTION_NOT_WAITING:
+                raise
+        else:
+            ended.append(wait.id)
+    return ended
 
 
 def consume_wait_closure(

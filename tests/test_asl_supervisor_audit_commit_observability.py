@@ -112,6 +112,40 @@ class CommitObservabilityTests(RunHistoryFixture, unittest.TestCase):
                 "committed to", self._mutation_guard_verdict(history).detail or ""
             )
 
+    def test_continuation_does_not_recredit_a_carried_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(tmp)
+            first = history[3] / "turn-0001-01"
+            result = json.loads((first / state.RESULT_FILE_NAME).read_text())
+            second = history[3] / "turn-0002-01"
+            second.mkdir()
+            result["workspace_write_guard"]["continuation"] = {
+                "merged": True,
+                "carried_repositories": ["app"],
+            }
+            self._write_result(second, result)
+
+            commits = self._bundle(history).payload["commits"]
+
+            self.assertEqual(1, len(commits["observed_head_transitions"]))
+            self.assertEqual(1, len(commits["commits"]))
+            self.assertEqual("turn-0001-01", commits["commits"][0]["turn"])
+
+    def test_repeated_observations_are_deduplicated_within_the_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(tmp)
+            first = history[3] / "turn-0001-01"
+            result = json.loads((first / state.RESULT_FILE_NAME).read_text())
+            second = history[3] / "turn-0002-01"
+            second.mkdir()
+            self._write_result(second, result)
+
+            commits = self._bundle(history).payload["commits"]
+
+            self.assertEqual(2, len(commits["observed_head_transitions"]))
+            for key in ("commits", "attempts", "commit_groups"):
+                self.assertEqual(1, len(commits[key]), key)
+
     def _other_repository_moved_on_a_refused_turn(
         self, tmp: str, guard_changes: dict[str, Any]
     ) -> dict[str, DeterministicResult]:

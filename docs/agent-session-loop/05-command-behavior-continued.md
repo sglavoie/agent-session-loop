@@ -186,11 +186,13 @@ Those two gates read the review's own artifacts, so on their own they say
 nothing about the workspace the run produced — a repair session verifies only
 the findings it was created for, which would leave an all-clear review after
 the last repair resting on no broad check at all. The generated review
-contract therefore also replays every gate the plan's own sessions explicitly
-mark with `review_replay: true`. Unmarked checks are session-local, including
-legacy checks authored before replay metadata existed. This fail-safe opt-in
-keeps contradictory historical assertions about HEAD, dirty trees, and
-intermediate files out of later reviews.
+contract therefore also replays every gate marked with `review_replay: true`.
+Conventional test, lint, check, build, and CI entry points default to replay,
+so an omitted marker does not silently drop suite coverage after repairs.
+An explicit `review_replay: false` excludes a point-in-time suite and survives
+contract rendering. Other unmarked checks remain session-local, keeping
+historical assertions about HEAD, dirty trees, and intermediate files out of
+later reviews. Custom suite commands should explicitly opt in.
 Each check is copied from its source session's completion contract, renamed
 `broad:<session>:<name>` so two sessions cannot collide on a bare name,
 deduplicated across sessions by repository, kind, argv, cwd, path, and

@@ -10,6 +10,7 @@ from . import (
     harness_compatibility,
     harnesses,
     plans_session_scope,
+    preflight_verification_checks,
     repository_evidence,
     state_locks,
     workspaces,
@@ -451,6 +452,13 @@ def _run_environment_checks(
     verification_context: VerificationContext | None = None,
 ) -> tuple[PreflightFinding, ...]:
     findings: list[PreflightFinding] = []
+
+    findings.extend(
+        preflight_verification_checks.check_commit_verification_ordering(
+            snapshot,
+            commit_mode=commit_mode,
+        )
+    )
 
     if cwd is not None:
         canonical_cwd = canonicalize_path(cwd)

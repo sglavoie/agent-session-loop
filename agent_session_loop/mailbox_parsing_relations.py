@@ -28,6 +28,7 @@ from .mailbox_vocabulary import (
     KIND_REPLY,
     RESOLUTION_ACTIONS,
     WAIT_END_REASON_CLOSURE,
+    WAIT_END_REASON_ERROR,
     WAIT_END_REASONS,
 )
 
@@ -93,7 +94,8 @@ def parse_lifecycle_target(
 
 
 def check_wait_start(state: ParseState, target: str) -> None:
-    if target in state.closures:
+    closure = state.closures.get(target)
+    if closure is not None and closure.id in state.receipts:
         raise RecordRejected(REJECT_QUESTION_NOT_OPEN, target)
     if target in state.active_waits:
         raise RecordRejected(REJECT_QUESTION_ALREADY_WAITING, target)
@@ -155,7 +157,9 @@ def parse_wait_end_reason(
         ):
             raise RecordRejected(REJECT_INVALID_CLOSURE_ID, str(closure_value))
         fields.closure_id = closure_value
-    elif closure_value is not None or closure is not None:
+    elif closure_value is not None or (
+        closure is not None and reason_value != WAIT_END_REASON_ERROR
+    ):
         raise RecordRejected(REJECT_INVALID_CLOSURE_ID, str(closure_value))
 
 

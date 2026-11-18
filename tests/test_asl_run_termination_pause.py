@@ -31,6 +31,31 @@ ASL_TEST_PORTABLE = True
 class PauseWriteTests(_TerminationCase):
     """The pause block, its policy, and the event that publishes it."""
 
+    def test_external_authority_remediation_names_captured_and_unwritten_paths(
+        self,
+    ) -> None:
+        for reason in (
+            "external-write-unclassified",
+            "external-write-unclassified-unwritten",
+        ):
+            with self.subTest(reason=reason):
+                run_termination.set_pause(
+                    self.payload,
+                    reason="workspace-write-guard-unavailable",
+                    message="external paths have unresolved write authority",
+                    details={
+                        "workspace_write_guard": {
+                            "unavailable": {
+                                "/outside/tool logs": {"reason": reason},
+                            }
+                        }
+                    },
+                )
+                [hint] = self.payload["action_required"]["remediation"]
+                self.assertEqual(["/outside/tool logs"], hint["paths"])
+                self.assertIn("--external-write-root", hint["message"])
+                self.assertFalse(self.payload["pause_policy"]["recoverable"])
+
     def test_exhausted_verification_repairs_require_inspection(self) -> None:
         run_termination.set_pause(
             self.payload,

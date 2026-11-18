@@ -22,6 +22,7 @@ from .contract_models import (
 from .literals import as_literal
 from .plans_errors import ContractError, PlanError
 from .plans_session_ids import SessionId
+from .verification_command_semantics import durable_suite_command
 from .workspaces import RepositoryRegistry, WorkspaceError, validate_repository_alias
 
 
@@ -112,8 +113,10 @@ def _on_failure_of(
     return tuple(names)
 
 
-def _review_replay(payload: dict, *, index: int, session_id: SessionId) -> bool:
-    raw = payload.get("review_replay", False)
+def _review_replay(
+    payload: dict, *, index: int, session_id: SessionId, default: bool = False
+) -> bool:
+    raw = payload.get("review_replay", default)
     if not isinstance(raw, bool):
         raise PlanError(
             f"session {session_id.value} contract check #{index + 1} "
@@ -239,7 +242,12 @@ def _parse_command_check(
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
     on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
-    review_replay = _review_replay(payload, index=index, session_id=session_id)
+    review_replay = _review_replay(
+        payload,
+        index=index,
+        session_id=session_id,
+        default=not on_failure_of and durable_suite_command(argv),
+    )
     return CommandCheck(
         name=name,
         argv=tuple(argv),
@@ -351,6 +359,14 @@ def check_payload(check: VerificationCheck) -> dict[str, Any]:
         payload["on_failure_of"] = list(check.on_failure_of)
     if check.review_replay:
         payload["review_replay"] = True
+    elif (
+        isinstance(check, CommandCheck)
+        and not check.on_failure_of
+        and durable_suite_command(check.argv)
+    ):
+        # Keep explicit point-in-time exclusions when a suite would otherwise
+        # default to replay, including after repair rendering and round trips.
+        payload["review_replay"] = False
     if check.repo is not None:
         payload["repo"] = check.repo
     return payload

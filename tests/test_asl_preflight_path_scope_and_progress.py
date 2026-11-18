@@ -12,17 +12,101 @@ from agent_session_loop import (
     plans_progress,
     plans_readiness,
     plans_session_ids,
+    plans_snapshot,
     preflight,
+    preflight_verification_checks,
 )
 from tests.support import (
     _contract_block,
     _write_loop_ready_plan,
+    write_multi_repo_plan,
     write_plan,
 )
 from tests.support_asl_preflight import PreflightCoreFixtures
 
 
 class PreflightPathScopeAndProgressTests(PreflightCoreFixtures):
+    def test_clean_tree_gate_can_protect_a_read_only_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            specs = (
+                ("APP", "app", "https://example.test/app.git"),
+                ("DEP", "dep", "https://example.test/dep.git"),
+            )
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                specs=specs,
+                contracts_by_id={
+                    "1": _contract_block(
+                        json.dumps(
+                            {
+                                "type": "command",
+                                "repo": "DEP",
+                                "name": "dependency-unchanged",
+                                "argv": ["git", "diff", "--quiet"],
+                            }
+                        ),
+                        session="1",
+                    )
+                },
+            )
+            session = plan_dir / "session-1.md"
+            session.write_text(
+                session.read_text().replace(
+                    "**Writes repositories**: APP, DEP", "**Writes repositories**: APP"
+                )
+            )
+            findings = preflight_verification_checks.check_commit_verification_ordering(
+                plans_snapshot.inspect_plan(plan_dir), commit_mode="per-session"
+            )
+            self.assertEqual((), findings)
+
+    def test_clean_tree_gates_are_refused_only_for_runner_owned_commits(self) -> None:
+        for argv in (
+            ["git", "diff", "--quiet"],
+            ["sh", "-c", 'test -z "$(git status --porcelain)"'],
+            [
+                "python3",
+                "-c",
+                "import subprocess; assert not subprocess.check_output("
+                "['git','status','--porcelain']).strip()",
+            ],
+        ):
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp:
+                plan_dir = Path(tmp) / "plan"
+                write_plan(
+                    plan_dir,
+                    ("pending",),
+                    contracts_by_id={
+                        "1": _contract_block(
+                            json.dumps(
+                                {
+                                    "type": "command",
+                                    "name": "clean-tree",
+                                    "argv": argv,
+                                }
+                            ),
+                            session="1",
+                        )
+                    },
+                )
+                snapshot = plans_snapshot.inspect_plan(plan_dir)
+                for mode in ("per-session", "end"):
+                    [finding] = (
+                        preflight_verification_checks.check_commit_verification_ordering(
+                            snapshot, commit_mode=mode
+                        )
+                    )
+                    self.assertEqual("red", finding.severity)
+                    self.assertEqual("verification-commit-ordering", finding.category)
+                self.assertEqual(
+                    (),
+                    preflight_verification_checks.check_commit_verification_ordering(
+                        snapshot, commit_mode=None
+                    ),
+                )
+
     def test_path_reference_accepts_absolute_file_and_regex_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
